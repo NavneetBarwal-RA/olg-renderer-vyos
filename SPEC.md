@@ -2,16 +2,18 @@
 
 ## 1. Overview
 
-`olg-renderer-vyos` is a Go library that converts OLG/uCentral JSON configuration into VyOS-style text configuration.
+`olg-renderer-vyos` converts validated OLG/uCentral JSON configuration into deterministic VyOS CLI `set` commands.
 
-The renderer is specific to VyOS.
+The renderer is a public Go library imported by `olg-server-vyos-client-natagent`.
 
-It is designed to be called by `olg-server-vyos-client-natagent` after the agent has loaded desired config from NATS KV using `nats-agent-core`.
-
-This repository owns only:
+The renderer does not apply commands. It only produces command text.
 
 ```text
-JSON input -> normalized render data -> templates -> VyOS-style text output
+OLG/uCentral JSON
+  -> renderer metadata validation
+  -> normalization
+  -> templates
+  -> VyOS set-command text
 ```
 
 ---
@@ -21,259 +23,595 @@ JSON input -> normalized render data -> templates -> VyOS-style text output
 The renderer must be:
 
 ```text
-- small
 - deterministic
 - side-effect free
-- template-driven
 - schema-version aware
-- easy to test
-- easy to integrate into olg-server-vyos-client-natagent
+- small enough to reason about
+- explicit in translation behavior
+- easy to test with golden fixtures
+- safe to call from olg-server-vyos-client-natagent
 ```
 
-For the same input JSON and same renderer version, the renderer must produce the same output text.
+For the same input payload, renderer version, schema version, and target rules, output must be identical.
 
 ---
 
 ## 3. Permanent Boundaries
 
-`olg-renderer-vyos` must not own:
+`olg-renderer-vyos` must not implement:
 
 ```text
 - NATS connection
-- JetStream KV access
+- JetStream KV read/write
 - configure/action handler registration
 - result/status publishing
 - local applied UUID state
+- VyOS delete/reconcile planning
 - VyOS apply/commit/save/discard
 - shell command execution
-- live device lifecycle management
+- live device inspection
+- runtime schema fetching
 ```
 
-Those responsibilities belong to `nats-agent-core`, `olg-server-vyos-client-natagent`, and the VyOS apply engine.
+These responsibilities belong to `nats-agent-core`, `olg-server-vyos-client-natagent`, and the agent's internal apply/VyOS packages.
 
 ---
 
-## 4. Related Components
+## 4. Public Renderer Facade
 
-Only high-level relationship is required.
+The renderer exposes a public Go facade used by `olg-server-vyos-client-natagent`.
 
-```text
-olg-ucentral-schema
-  schema files and validation rules
+The renderer package must not import `nats-agent-core` and must not accept `agentcore.StoredDesiredConfig` directly. The agent owns the adapter from its desired-config record to renderer input.
 
-olg-ucentral-client
-  validates and submits desired config
+Expected public API direction:
 
-nats-agent-core
-  NATS, KV, subjects, desired config storage, result/status envelopes
+```go
+package renderer
 
-olg-server-vyos-client-natagent
-  loads desired config, calls renderer, calls apply engine, publishes result/status
+func New(opts ...Option) (*Renderer, error)
 
-olg-renderer-vyos
-  renders JSON config into VyOS-style text
+func (r *Renderer) Render(ctx context.Context, input Input) (Output, error)
+
+func GetInfo() Info
+
+func (r *Renderer) Info() Info
 ```
 
-The renderer does not read directly from the KV bucket.
+Expected public input shape:
+
+```go
+type Input struct {
+    Target        string
+    ConfigUUID    string
+    SchemaName    string
+    SchemaVersion string
+    PayloadJSON   json.RawMessage
+}
+```
+
+Expected public output shape:
+
+```go
+type Output struct {
+    Target        string
+    ConfigUUID    string
+    SchemaName    string
+    SchemaVersion string
+    RenderedText  string
+}
+```
+
+Expected renderer info shape:
+
+```go
+type Info struct {
+    Name                    string
+    Version                 string
+    Target                  string
+    SupportedSchemaName     string
+    SupportedSchemaVersions []string
+}
+```
+
+Go API note:
+
+```text
+- The renderer exposes GetInfo() and (*Renderer).Info().
+- Go does not allow both type Info and func Info() in the same package namespace.
+- Documentation and callers should use GetInfo() for the package-level metadata accessor.
+```
+
+Facade rules:
+
+```text
+- PayloadJSON must be the actual OLG/uCentral desired config object, not the full NATS KV record.
+- RenderedText must be VyOS CLI set-command text only.
+- RenderedText must not include configure/commit/save/delete/show commands.
+- The agent adapter maps agentcore.StoredDesiredConfig into renderer.Input.
+```
+
+Agent adapter mapping:
+
+```text
+desired.Record.Target  -> renderer.Input.Target
+desired.Record.UUID    -> renderer.Input.ConfigUUID
+desired.Record.Payload -> renderer.Input.PayloadJSON
+configured schema name -> renderer.Input.SchemaName
+configured schema ver. -> renderer.Input.SchemaVersion
+```
 
 ---
 
-## 5. Input Contract
+## 5. Renderer Input Contract
 
-Canonical field names used in this SPEC:
+The renderer input contains metadata plus the desired JSON payload.
 
-```text
-- target
-- config_uuid
-- schema_name
-- schema_version
-- payload_json
-```
-
-The renderer input must include:
+Required metadata:
 
 ```text
-- target
-- config_uuid
-- schema_name
-- schema_version
-- payload_json
+target
+config_uuid
+schema_name
+schema_version
+payload_json
 ```
 
-Expected values for the first MVP:
+Expected MVP metadata values:
 
 ```text
 target = vyos
 schema_name = olg-ucentral
-schema_version = first supported OLG/uCentral schema version
+schema_version = first explicitly supported OLG/uCentral schema version
 ```
 
-`payload_json` should contain the desired configuration object and schema metadata.
+### Canonical `payload_json`
 
-Metadata precedence and consistency rules:
+For the MVP, `payload_json` is the raw OLG/uCentral config object.
+
+Example shape:
+
+```json
+{
+  "interfaces": [],
+  "nat": {},
+  "services": {},
+  "uuid": 1770891457
+}
+```
+
+The renderer does not expect the NATS KV record shape.
+
+If the desired config is wrapped by another component, the agent adapter must pass the actual OLG/uCentral config object to the renderer.
+
+### Optional payload metadata
+
+If payload metadata exists, it must not contradict renderer input metadata.
+
+Accepted optional payload fields:
 
 ```text
-1. Top-level renderer input metadata (target/config_uuid/schema_name/schema_version) is required.
-2. Payload metadata is optional.
-3. If payload metadata exists, it must match top-level metadata exactly.
-4. Any mismatch must return metadata_mismatch.
+target
+schema_name
+schema_version
+schema.name
+schema.version
+uuid
 ```
 
-Payload extraction path contract for `payload_json` (MVP):
+Rules:
 
 ```text
-1. config object:
-   - primary: $.config
-   - required for MVP
-2. schema_name:
-   - primary: $.schema.name
-   - accepted alias: $.schema_name
-3. schema_version:
-   - primary: $.schema.version
-   - accepted alias: $.schema_version
-4. target (optional):
-   - accepted path: $.target
-   - if present, it must match top-level target
+- renderer input metadata is authoritative
+- payload metadata is optional
+- if payload metadata exists and conflicts with input metadata, return metadata_mismatch
+- payload uuid may be used for traceability, but config_uuid remains authoritative
 ```
-
-If a required path is missing, renderer must return `missing_config` or `metadata_mismatch` (as appropriate) and must not continue to rendering.
 
 ---
 
-## 6. Output Contract
+## 6. Renderer Output Contract
 
 The renderer output must include:
 
 ```text
-- target
-- config_uuid
-- schema_name
-- schema_version
-- rendered_text
+target
+config_uuid
+schema_name
+schema_version
+rendered_text
 ```
 
-The renderer returns text only.
+`rendered_text` must be VyOS CLI set-command text.
 
-It must not write the rendered text to disk.
-
-Rendered text output contract (MVP):
+Output format:
 
 ```text
-1. Output is UTF-8 VyOS CLI set-command text.
-2. One command per line.
-3. Line endings are \n (LF), including a trailing newline at EOF.
-4. Deterministic ordering is required:
-   - top-level section order: interface, nat
-   - stable deterministic sorting within each section.
-5. Renderer output must not include operational/session commands:
-   - configure
-   - commit
-   - save
-   - discard
-   - exit
-6. If no supported section is present, renderer may return empty rendered_text.
+- UTF-8
+- one command per line
+- LF line endings
+- trailing newline when output is non-empty
+- deterministic command order
 ```
 
-This section defines renderer output shape only. Execution/apply behavior remains the responsibility of `olg-server-vyos-client-natagent` and its apply engine.
+Renderer output must not include:
+
+```text
+configure
+commit
+save
+discard
+exit
+delete
+show
+```
+
+The renderer describes desired configuration only. Delete/reconcile behavior is handled by the agent apply layer.
 
 ---
 
-## 7. Public API Requirement
+## 7. Rendering Scope for MVP
 
-The public package should expose a minimal API.
-
-At a high level, it must support:
+MVP supported sections:
 
 ```text
-- creating a renderer instance
-- rendering JSON payload into VyOS text
-- returning renderer metadata such as target and supported schema versions
+interfaces
+explicit source NAT
 ```
 
-The public package should not expose internal template or normalization details.
+Out of MVP scope but valid future renderer sections:
 
-Exact Go structs and function signatures should be finalized during implementation, not over-specified in this SPEC.
+```text
+DHCP
+DNS
+firewall
+routing
+system
+service
+PKI
+```
 
 ---
 
-## 8. Schema Compatibility
+## 8. Interface Input Contract
 
-The renderer must check compatibility before rendering.
-
-Required checks:
+The renderer reads interface data from:
 
 ```text
-- target is supported
-- schema_name is supported
-- schema_version is supported
+payload_json.interfaces
 ```
 
-The renderer must not use `agentcore.Config.Version` or NATS envelope version as the OLG/uCentral schema version.
+`interfaces` must be an array when present.
 
-These are different version concepts.
+Supported interface roles:
 
-Unsupported `target`, `schema_name`, or `schema_version` must return typed renderer errors.
+```text
+upstream
+downstream
+```
+
+Unsupported roles are ignored for MVP rendering.
+
+### Interface fields
+
+Supported fields:
+
+```text
+interfaces[].name
+interfaces[].role
+interfaces[].ethernet[].select-ports[]
+interfaces[].ethernet[].vlan-tag
+interfaces[].ipv4.addressing
+interfaces[].ipv4.subnet
+interfaces[].vlan.id
+```
+
+### Interface alias policy
+
+No interface field aliases are accepted in the MVP.
+
+Accepted interface field names are exactly:
+
+```text
+interfaces[].ethernet
+interfaces[].ethernet[].select-ports
+interfaces[].ethernet[].vlan-tag
+interfaces[].ipv4.addressing
+interfaces[].ipv4.subnet
+interfaces[].role
+interfaces[].name
+interfaces[].vlan.id
+```
+
+The renderer should not document or silently depend on snake_case aliases such as:
+
+```text
+select_ports
+vlan_tag
+```
+
+Required missing fields should return a typed normalization error. Optional unsupported fields may be ignored.
+
+### Required fields by case
+
+For any renderable interface:
+
+```text
+role
+ethernet[].select-ports[]
+```
+
+For dynamic IPv4:
+
+```text
+ipv4.addressing = dynamic
+```
+
+For static IPv4:
+
+```text
+ipv4.addressing = static
+ipv4.subnet
+```
+
+For VLAN/VIF rendering:
+
+```text
+role = downstream
+vlan.id
+ipv4.subnet
+```
+
+### Interface normalization rules
+
+```text
+- upstream non-VLAN interface maps to bridge br0
+- first downstream non-VLAN interface maps to bridge br1
+- additional downstream non-VLAN interfaces map to br2, br3, ...
+- top-level VLAN interfaces are not rendered as separate bridges
+- downstream VLAN interfaces are rendered as VIFs on the downstream bridge
+- static subnet values from the cloud payload must be preserved exactly
+- physical interface mapping must be deterministic
+```
+
+Example physical mapping for MVP fixtures:
+
+```text
+WAN* -> eth0
+LAN* -> eth1
+LAN1 -> eth1
+LAN2 -> eth1
+```
+
+If production mapping differs, it must be provided by renderer configuration or agent adapter input. The renderer must not discover live device interfaces.
 
 ---
 
-## 9. Rendering Pipeline
+## 9. Canonical Interface Example
+
+Input:
+
+```json
+{
+  "interfaces": [
+    {
+      "ethernet": [
+        {
+          "select-ports": ["WAN*"]
+        }
+      ],
+      "ipv4": {
+        "addressing": "dynamic"
+      },
+      "name": "WAN",
+      "role": "upstream"
+    },
+    {
+      "ethernet": [
+        {
+          "select-ports": ["LAN*"]
+        }
+      ],
+      "ipv4": {
+        "addressing": "static",
+        "subnet": "192.168.60.1/24"
+      },
+      "name": "LAN",
+      "role": "downstream"
+    },
+    {
+      "ethernet": [
+        {
+          "select-ports": ["LAN2"],
+          "vlan-tag": "auto"
+        }
+      ],
+      "ipv4": {
+        "addressing": "static",
+        "subnet": "192.168.10.1/24"
+      },
+      "name": "LAN.10",
+      "role": "downstream",
+      "vlan": {
+        "id": 10
+      }
+    }
+  ]
+}
+```
+
+Expected output:
+
+```text
+set interfaces bridge br0 address dhcp
+set interfaces bridge br0 description 'WAN'
+set interfaces bridge br0 member interface eth0
+set interfaces bridge br1 address 192.168.60.1/24
+set interfaces bridge br1 description 'LAN'
+set interfaces bridge br1 enable-vlan
+set interfaces bridge br1 member interface eth1 allowed-vlan 10
+set interfaces bridge br1 vif 10 address 192.168.10.1/24
+set interfaces bridge br1 vif 10 description 'LAN.10'
+set interfaces ethernet eth0 description 'WAN'
+set interfaces ethernet eth1 description 'LAN'
+```
+
+Ordering requirements:
+
+```text
+- bridge commands before ethernet commands
+- br0 before br1
+- VIFs sorted by VLAN ID
+- ethernet interfaces sorted by interface name
+```
+
+---
+
+## 10. NAT Input Contract
+
+The renderer reads explicit source NAT data from:
+
+```text
+payload_json.nat.snat.rules
+```
+
+`rules` must be an array when present.
+
+NAT is optional. If absent, renderer must not generate NAT commands.
+
+### Required NAT fields
+
+Each rule must include:
+
+```text
+rule-id or rule_id
+out-interface.name or out_interface.name
+source.address
+translation.address
+```
+
+Accepted aliases:
+
+```text
+rule-id        or rule_id
+out-interface  or out_interface
+```
+
+### NAT normalization rules
+
+```text
+- rules are explicit only
+- no auto-NAT generation
+- output rules sorted by numeric rule ID
+- cloud-provided source and translation values are preserved exactly
+```
+
+---
+
+## 11. Canonical NAT Example
+
+Input:
+
+```json
+{
+  "nat": {
+    "snat": {
+      "rules": [
+        {
+          "rule-id": 100,
+          "out-interface": {
+            "name": "br0"
+          },
+          "source": {
+            "address": "192.168.60.0/24"
+          },
+          "translation": {
+            "address": "masquerade"
+          }
+        },
+        {
+          "rule_id": 110,
+          "out_interface": {
+            "name": "br0"
+          },
+          "source": {
+            "address": "192.168.10.0/24"
+          },
+          "translation": {
+            "address": "masquerade"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Expected output:
+
+```text
+set nat source rule 100 outbound-interface name br0
+set nat source rule 100 source address 192.168.60.0/24
+set nat source rule 100 translation address masquerade
+set nat source rule 110 outbound-interface name br0
+set nat source rule 110 source address 192.168.10.0/24
+set nat source rule 110 translation address masquerade
+```
+
+---
+
+## 12. Rendering Pipeline
 
 The renderer must follow this pipeline:
 
 ```text
 render
-  -> validate context/input metadata
-  -> check schema compatibility
-  -> decode JSON payload
-  -> extract config object
+  -> validate context and input metadata
+  -> check target/schema/schema_version compatibility
+  -> decode payload_json
+  -> check optional payload metadata
   -> normalize supported sections
-  -> render templates in fixed order
-  -> return rendered output
+  -> execute templates in fixed order
+  -> return rendered_text
 ```
 
 Initial render order:
 
 ```text
-interface
+interfaces
 nat
 ```
 
-Future render sections can be added later without changing the public API.
-
 ---
 
-## 10. Normalization Layer
+## 13. Normalization Layer
 
-The renderer must use a small normalization layer.
+Normalization converts raw JSON into template-friendly render data.
 
-Purpose:
-
-```text
-payload_json
-  -> template-friendly data
-```
-
-The normalizer should handle:
+Normalization owns:
 
 ```text
-- payload wrapper parsing
-- config object extraction
-- field alias handling
-- interface grouping
-- bridge/VLAN data preparation
-- NAT rule preparation
+- payload parsing
+- optional metadata checks
+- field alias handling for NAT
+- interface role filtering
+- bridge naming
+- VLAN/VIF grouping
+- physical port mapping
+- NAT rule normalization
 - deterministic sorting
 ```
 
-Templates should not contain complex decision logic.
+Templates should not contain business mapping decisions.
 
 ---
 
-## 11. Template Layer
+## 14. Template Layer
 
-Templates produce the final VyOS-style text.
+Templates format normalized data into set-command text.
 
-Initial template structure:
+Templates are implementation assets and should be added when renderer implementation begins.
+
+Initial structure:
 
 ```text
 internal/templates/
@@ -287,149 +625,221 @@ internal/templates/
     vlan.tmpl
 ```
 
-`templates.go` should:
+Responsibilities:
 
 ```text
-- embed templates
-- execute templates
-- control top-level render order
-- join non-empty rendered sections
+templates.go
+  embeds templates, executes top-level sections, joins output
+
+interface.tmpl
+  renders interface-related command groups
+
+interface/bridge.tmpl
+  renders bridge commands
+
+interface/ethernet.tmpl
+  renders ethernet commands
+
+interface/vlan.tmpl
+  renders VIF commands
+
+nat.tmpl
+  renders source NAT commands
 ```
 
-No root template is required initially.
+Templates must not depend on Go map iteration order.
 
-The rule is:
+---
+
+## 15. Schema Usage
+
+Schemas are used as contracts and guardrails.
+
+### OLG/uCentral schema
+
+Used for:
 
 ```text
-templates.go controls render order.
-top-level templates render major config sections.
-nested templates render sub-objects.
+- defining supported input schema version
+- validating fixtures in CI/build
+- avoiding drift with olg-ucentral-client
+```
+
+The renderer should not fetch this schema at runtime.
+
+### VyOS config schema
+
+Used for:
+
+```text
+- validating generated command paths in tests or CI
+- identifying supported target command paths for a specific VyOS build
+- future compatibility checks
+```
+
+For MVP, the VyOS schema may be stored as a checked-in snapshot or documented external build artifact. Later, the VyOS build system can generate or provide the exact schema snapshot used by the target image.
+
+### Manual translation
+
+The schemas do not replace translation logic.
+
+Manual renderer logic defines mappings such as:
+
+```text
+upstream -> br0
+downstream -> br1
+VLAN downstream -> bridge VIF
+WAN* -> eth0
+LAN* -> eth1
 ```
 
 ---
 
-## 12. Interface Rendering Requirement
+## 16. Version Compatibility
 
-Initial interface rendering should support the useful subset required for the first VyOS output.
+The renderer must expose supported schema metadata.
 
-It should handle:
+MVP compatibility should use an exact supported-version list:
 
 ```text
-- interface configuration from the payload
-- upstream/downstream roles
-- bridge data preparation
-- ethernet member data preparation
-- VLAN/VIF data preparation where supported
-- deterministic ordering
+supported_schema_versions = ["1.0.0"]
 ```
 
-The renderer must not inspect the live VyOS device to discover interfaces.
+Do not use broad min/max ranges until compatibility across versions is verified.
 
-Device-specific discovery, if needed later, must be handled outside this renderer or passed in as explicit input.
+Future compatibility can be implemented using:
+
+```text
+- explicit supported version list
+- version-specific normalizers
+- schema fixture validation per version
+```
 
 ---
 
-## 13. NAT Rendering Requirement
+## 17. Error Model
 
-Initial NAT rendering should support explicit NAT rules.
+The renderer must return typed errors with stable categories.
 
-It should handle:
-
-```text
-- explicit NAT rules from the payload
-- required NAT rule fields
-- accepted field aliases if needed
-- deterministic rule ordering
-```
-
-Important rule:
+Required categories:
 
 ```text
-NAT is explicit and optional.
+invalid_input
+invalid_json
+unsupported_target
+unsupported_schema
+unsupported_schema_version
+metadata_mismatch
+missing_config
+normalize_failed
+template_failed
+render_failed
 ```
 
-If NAT is absent, the renderer must not invent NAT behavior.
+Rules:
 
-Auto-generated NAT must not be added unless it becomes an explicit product requirement.
+```text
+- invalid JSON returns invalid_json
+- unsupported target returns unsupported_target
+- unsupported schema name returns unsupported_schema
+- unsupported schema version returns unsupported_schema_version
+- payload/input metadata conflict returns metadata_mismatch
+- missing required config object for a supported section returns missing_config or normalize_failed
+```
+
+The agent may map all renderer errors to a single wire error code such as `render_failed`, while preserving the typed renderer error internally for logging/debugging.
 
 ---
 
-## 14. Deterministic Output
-
-Rendered output must be stable.
+## 18. Deterministic Output Requirements
 
 The renderer must avoid:
 
 ```text
 - random map iteration
 - timestamps
+- generated comments
 - environment-specific values
 - live-device-specific values
-- generated comments that change between runs
 ```
 
-Golden tests should compare exact output.
-
----
-
-## 15. Error Model
-
-The renderer must return typed errors with stable error codes.
-
-Suggested error categories:
+Sorting requirements:
 
 ```text
-invalid_input
-invalid_json
-unsupported_schema
-unsupported_schema_version
-unsupported_target
-metadata_mismatch
-missing_config
-normalize_failed
-render_failed
-template_failed
+- sections sorted by fixed render order
+- bridges sorted by generated bridge order
+- VLANs sorted by VLAN ID
+- ethernet interfaces sorted by interface name
+- NAT rules sorted by numeric rule ID
 ```
-
-`olg-server-vyos-client-natagent` can map these codes into configure result errors.
 
 ---
 
-## 16. Context Handling
+## 19. Testing Requirements
 
-The render operation must accept a context.
+### Unit tests
 
-Rules:
+Required:
 
 ```text
-- nil context is invalid
-- canceled context must stop rendering before meaningful work continues
-- internal operations should check context at safe boundaries
+- input metadata validation
+- schema compatibility checks
+- optional payload metadata mismatch
+- interface normalization
+- NAT alias handling
+- error categories
 ```
 
-The renderer must not store caller contexts.
+### Golden tests
 
----
-
-## 17. Logging
-
-The renderer should not log by default.
-
-The caller owns operational logging.
-
-If logging is added later, it should be optional and must not log:
+Required:
 
 ```text
-- full payload
-- secrets
-- rendered config text by default
+testdata/valid/*.json
+  -> render
+  -> compare exactly with testdata/golden/*.set
+```
+
+Required fixtures:
+
+```text
+interface-basic.json
+interface-vlan.json
+nat-explicit.json
+nat-absent.json
+full-mvp.json
+```
+
+Required golden outputs:
+
+```text
+interface-basic.set
+interface-vlan.set
+nat-explicit.set
+nat-absent.set
+full-mvp.set
+```
+
+### Determinism test
+
+Render the same fixture repeatedly and assert identical output.
+
+### Schema compatibility tests
+
+For MVP, use checked-in fixtures aligned with the supported OLG/uCentral schema version.
+
+Later CI may:
+
+```text
+- fetch OLG/uCentral schema from pinned tag/commit
+- validate fixtures against schema
+- compute schema hash
+- validate set-command paths against VyOS schema snapshot
 ```
 
 ---
 
-## 18. Minimal Repository Structure
-
-Initial structure:
+## 20. Repository Layout
 
 ```text
 olg-renderer-vyos/
@@ -460,245 +870,134 @@ olg-renderer-vyos/
 
   testdata/
     valid/
-      basic.json
-      explicit-nat.json
-      vlan.json
+      interface-basic.json
+      interface-vlan.json
+      nat-explicit.json
+      nat-absent.json
+      full-mvp.json
 
     golden/
-      basic.vyos
-      explicit-nat.vyos
-      vlan.vyos
+      interface-basic.set
+      interface-vlan.set
+      nat-explicit.set
+      nat-absent.set
+      full-mvp.set
+
+  schemas/
+    README.md
+    manifest.example.json
+
+    ucentral/
+      SOURCE.md
+      schema.json
+      ucentral.schema.full.json
+
+    vyos/
+      SOURCE.md
+      vyos-config-schema.json
 ```
 
-Add new folders/files only when there is real renderer logic for them.
+Add future files only when implementation requires them.
 
 ---
 
-## 19. Integration With olg-server-vyos-client-natagent
+## 21. Agent Integration Contract
 
-The agent should integrate this renderer through an adapter.
-
-The adapter converts from the agent's desired config record into the renderer input.
-
-Required adapter contract for current placeholder replacement:
-
-```go
-// Existing natagent-side contract to preserve:
-Render(ctx context.Context, desired agentcore.StoredDesiredConfig) (renderer.Output, error)
-
-type Output struct {
-    Target string
-    UUID   string
-    Text   string
-}
-```
-
-Adapter behavior requirements:
+The agent adapter should:
 
 ```text
-1. Read desired metadata from desired.Record and payload_json.
-2. Build renderer input with target/config_uuid/schema_name/schema_version/payload_json.
-3. Call olg-renderer-vyos render method.
-4. Return natagent renderer.Output where:
-   - Output.Target = desired.Record.Target
-   - Output.UUID   = desired.Record.UUID
-   - Output.Text   = rendered_text from olg-renderer-vyos
-5. Do not perform NATS/KV/apply logic in the adapter.
+- load desired config using nats-agent-core
+- extract payload JSON
+- provide target/config_uuid/schema_name/schema_version to renderer
+- call renderer
+- pass rendered_text to internal apply/reconcile engine
 ```
 
-Recommended mapping:
+The renderer must not import agent internals.
 
-```text
-desired target  -> renderer target
-desired UUID    -> renderer config_uuid
-desired payload -> renderer payload_json
-payload schema  -> renderer schema_name
-payload version -> renderer schema_version
-```
-
-The agent configure flow should remain:
-
-```text
-LoadDesiredConfig
-  -> compare desired UUID with local state
-  -> call renderer
-  -> call apply engine
-  -> update state on success
-  -> publish result/status
-```
-
-Only the renderer implementation changes:
-
-```text
-placeholder renderer
-  -> olg-renderer-vyos adapter
-```
+The agent must not expose renderer internals over NATS. NATS subjects trigger handlers; handlers call internal services.
 
 ---
 
-## 20. Failure Behavior During Agent Integration
+## 22. Apply/Reconcile Boundary
 
-If rendering fails:
+Renderer output is desired `set` commands only.
+
+The agent apply layer owns:
 
 ```text
-1. renderer returns typed error.
-2. olg-server-vyos-client-natagent does not call apply engine.
-3. olg-server-vyos-client-natagent does not update applied UUID state.
-4. olg-server-vyos-client-natagent publishes configure failure status/result.
+- comparing old desired state and new desired state
+- deciding delete commands
+- preserving protected config
+- executing set/delete commands
+- commit
+- save
+- discard on failure
 ```
 
-Examples:
+The renderer should not generate delete commands in the MVP.
+
+---
+
+## 23. Future Roadmap
+
+Future renderer work:
 
 ```text
-unsupported_schema_version -> configure failure
-invalid_json               -> configure failure
-render_failed              -> configure failure
+- DHCP rendering
+- DNS rendering
+- firewall rendering
+- routing rendering
+- service rendering
+- system rendering
+- PKI rendering
+- multiple schema versions
+- schema fixture validation in CI
+- VyOS schema command-path validation
 ```
 
-Recommended typed-error mapping from `olg-renderer-vyos` to natagent configure result `error_code`:
+Future agent-side work:
 
 ```text
-unsupported_schema           -> render_failed
-unsupported_schema_version   -> render_failed
-unsupported_target           -> render_failed
-metadata_mismatch            -> render_failed
-missing_config               -> render_failed
-invalid_json                 -> render_failed
-normalize_failed             -> render_failed
-template_failed              -> render_failed
-render_failed                -> render_failed
-```
-
-Implementation note:
-
-```text
-- natagent can keep a single public failure code (render_failed) for wire compatibility.
-- typed renderer codes should still be logged and preserved in wrapped internal errors for debugging.
+- last-applied plan storage
+- diff/reconcile apply engine
+- protected config policy
+- live config drift detection
+- non-interactive VyOS operation wrapper
 ```
 
 ---
 
-## 21. Testing Requirements
-
-### Unit tests
-
-Required:
-
-```text
-- input validation
-- schema compatibility
-- payload parsing
-- normalization behavior
-- typed error codes
-```
-
-### Golden tests
-
-Required:
-
-```text
-testdata/valid/*.json
-  -> render
-  -> compare with testdata/golden/*.vyos
-```
-
-### Compatibility tests
-
-Use fixtures aligned with `olg-ucentral-schema`.
-
-Initial approach:
-
-```text
-copy fixed fixtures into testdata
-```
-
-Later CI may pin `olg-ucentral-schema` and validate fixtures with schema tooling.
-
-The renderer must not depend on schema validation scripts at runtime.
-
----
-
-## 22. Single MVP Development Scope
-
-The first implementation should be one complete MVP.
-
-Implement:
-
-```text
-- Go module
-- public renderer package
-- typed error model
-- schema compatibility check
-- JSON payload parsing
-- minimal normalization
-- interface rendering
-- explicit NAT rendering
-- templates grouped by config object
-- golden tests
-```
-
-Acceptance criteria:
+## 24. Acceptance Criteria for MVP
 
 ```text
 - go build ./... succeeds
 - go test ./... succeeds
-- valid JSON fixtures render expected VyOS text
-- unsupported schema/version/target returns typed errors
-- invalid JSON returns typed error
+- canonical interface example renders expected set commands
+- canonical NAT example renders expected set commands
+- NAT absent does not generate NAT
+- unsupported target/schema/version returns typed errors
+- metadata mismatch returns typed error
 - output is deterministic
-- no NATS/KV/apply/shell/device lifecycle logic is added
+- no NATS/KV/apply/shell/device execution logic is added
 ```
 
 ---
 
-## 23. Future Renderer Scope
+## 25. Summary
 
-Future renderer sections may include:
+`olg-renderer-vyos` is a pure renderer.
 
-```text
-- DHCP
-- DNS
-- firewall
-- routing
-- system
-- service
-- PKI
-```
-
-Each future section should follow the same pattern:
+It receives:
 
 ```text
-raw JSON section
-  -> normalize
-  -> template
-  -> golden test
+metadata + OLG/uCentral JSON
 ```
 
-These are valid renderer features, but they are not required for the initial MVP.
-
----
-
-## 24. Design Summary
-
-`olg-renderer-vyos` must remain a pure renderer.
-
-It should:
+It returns:
 
 ```text
-- receive JSON payload and metadata
-- check compatibility
-- normalize supported fields
-- render deterministic VyOS text
-- return output or typed error
+VyOS CLI set-command text
 ```
 
-It should not:
-
-```text
-- connect to NATS
-- read KV
-- apply config
-- execute commands
-- manage state
-- publish status/result
-```
+It does not apply, delete, reconcile, connect to NATS, or inspect the device.
