@@ -584,6 +584,7 @@ ordering, exact formatting, and section rendering behavior.
 Validates:
   - Interface-only fixtures match expected output
   - NAT-only and NAT-absent fixtures match expected output
+  - Masquerade translation.address keyword renders as translation address masquerade
   - Combined full MVP fixture matches expected output exactly
 */
 func TestRenderGoldenFixtures(t *testing.T) {

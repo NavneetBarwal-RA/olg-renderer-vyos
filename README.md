@@ -435,6 +435,28 @@ rule-id        or rule_id
 out-interface  or out_interface
 ```
 
+MVP NAT translation support:
+
+```text
+- explicit source NAT uses nat.snat.rules[].translation.address
+- translation.address may be a concrete translated address
+- translation.address may also be a schema-supported keyword such as masquerade
+```
+
+Example:
+
+```json
+"translation": {
+  "address": "masquerade"
+}
+```
+
+Example output:
+
+```text
+set nat source rule 100 translation address masquerade
+```
+
 Expected output:
 
 ```text

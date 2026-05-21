@@ -507,6 +507,34 @@ out-interface  or out_interface
 - cloud-provided source and translation values are preserved exactly
 ```
 
+### NAT translation address
+
+MVP source NAT intentionally supports:
+
+```text
+nat.snat.rules[].translation.address
+```
+
+`translation.address` is a string from the OLG/uCentral schema. It may be a concrete translated source address or a schema-supported keyword such as:
+
+```text
+masquerade
+```
+
+Example:
+
+```json
+"translation": {
+  "address": "masquerade"
+}
+```
+
+Expected output:
+
+```text
+set nat source rule 100 translation address masquerade
+```
+
 ---
 
 ## 11. Canonical NAT Example
