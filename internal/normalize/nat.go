@@ -38,11 +38,16 @@ func normalizeNAT(root map[string]json.RawMessage) (NATSection, error) {
 	}
 
 	rules := make([]NATRule, 0, len(entries))
+	seenRuleIDs := make(map[int]struct{}, len(entries))
 	for idx, rawEntry := range entries {
 		rule, err := normalizeNATRule(rawEntry)
 		if err != nil {
 			return NATSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("nat.snat.rules[%d]: %v", idx, err), nil)
 		}
+		if _, exists := seenRuleIDs[rule.RuleID]; exists {
+			return NATSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("duplicate nat.snat.rules rule ID %d", rule.RuleID), nil)
+		}
+		seenRuleIDs[rule.RuleID] = struct{}{}
 		rules = append(rules, rule)
 	}
 
@@ -68,14 +73,23 @@ func normalizeNATRule(rawRule json.RawMessage) (NATRule, error) {
 	if err != nil {
 		return NATRule{}, err
 	}
+	if err := validateInterfaceToken(outbound, "out-interface.name"); err != nil {
+		return NATRule{}, err
+	}
 
 	sourceAddr, err := readNestedAddress(ruleObj, "source")
 	if err != nil {
 		return NATRule{}, err
 	}
+	if err := validateAddressToken(sourceAddr, "source.address"); err != nil {
+		return NATRule{}, err
+	}
 
 	translationAddr, err := readNestedAddress(ruleObj, "translation")
 	if err != nil {
+		return NATRule{}, err
+	}
+	if err := validateAddressToken(translationAddr, "translation.address"); err != nil {
 		return NATRule{}, err
 	}
 

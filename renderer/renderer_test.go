@@ -33,7 +33,7 @@ func TestGetInfoMetadata(t *testing.T) {
 	if info.SupportedSchemaName != "olg-ucentral" {
 		t.Fatalf("unexpected schema name: %q", info.SupportedSchemaName)
 	}
-	if len(info.SupportedSchemaVersions) != 1 || info.SupportedSchemaVersions[0] != "1.0.0" {
+	if len(info.SupportedSchemaVersions) != 1 || info.SupportedSchemaVersions[0] != "4.2.0" {
 		t.Fatalf("unexpected supported versions: %#v", info.SupportedSchemaVersions)
 	}
 
@@ -70,7 +70,7 @@ func TestRenderInvalidInput(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   []byte(`{"interfaces":[]}`),
 	}
 
@@ -120,7 +120,7 @@ func TestRenderUninitializedRenderer(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   []byte(`{"interfaces":[]}`),
 	})
 	assertErrorCode(t, err, CodeRenderFailed)
@@ -150,7 +150,7 @@ func TestRenderCompatibilityChecks(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   []byte(`{"interfaces":[]}`),
 	}
 
@@ -187,7 +187,7 @@ func TestRenderInvalidJSON(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   []byte(`{"interfaces":`),
 	})
 	assertErrorCode(t, err, CodeInvalidJSON)
@@ -217,7 +217,7 @@ func TestRenderPayloadMetadataMismatch(t *testing.T) {
 		"target": "not-vyos",
 		"schema": {
 			"name": "olg-ucentral",
-			"version": "1.0.0"
+			"version": "4.2.0"
 		},
 		"interfaces": []
 	}`)
@@ -226,10 +226,261 @@ func TestRenderPayloadMetadataMismatch(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   payload,
 	})
 	assertErrorCode(t, err, CodeMetadataMismatch)
+}
+
+/*
+TC-NORMALIZE-001
+Type: Negative
+Title: Duplicate NAT rule IDs
+Summary:
+Ensures explicit source NAT rules cannot reuse the same rule ID. Duplicate
+IDs would render repeated set-command blocks for the same VyOS rule and create
+ambiguous configuration intent.
+
+Validates:
+  - Duplicate NAT rule IDs are rejected
+  - Duplicate detection happens before rendering
+  - Failure returns normalize_failed
+*/
+func TestRenderRejectsDuplicateNATRuleIDs(t *testing.T) {
+	payload := []byte(`{
+		"nat": {
+			"snat": {
+				"rules": [
+					{
+						"rule-id": 100,
+						"out-interface": {"name": "br0"},
+						"source": {"address": "192.168.60.0/24"},
+						"translation": {"address": "masquerade"}
+					},
+					{
+						"rule_id": 100,
+						"out_interface": {"name": "br0"},
+						"source": {"address": "192.168.10.0/24"},
+						"translation": {"address": "masquerade"}
+					}
+				]
+			}
+		}
+	}`)
+
+	_, err := renderPayload(t, payload)
+	assertErrorCode(t, err, CodeNormalizeFailed)
+}
+
+/*
+TC-NORMALIZE-002
+Type: Negative
+Title: Unsafe interface descriptions
+Summary:
+Verifies that interface names used as rendered descriptions cannot contain
+characters that would break VyOS single-quoted command formatting. The test
+uses a single quote because it would terminate the rendered description.
+
+Validates:
+  - Unsafe description values are rejected
+  - Single quotes are not rendered into command descriptions
+  - Failure returns normalize_failed
+*/
+func TestRenderRejectsUnsafeInterfaceDescriptions(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["WAN*"]}],
+				"ipv4": {"addressing": "dynamic"},
+				"name": "W'AN",
+				"role": "upstream"
+			}
+		]
+	}`)
+
+	_, err := renderPayload(t, payload)
+	assertErrorCode(t, err, CodeNormalizeFailed)
+}
+
+/*
+TC-NORMALIZE-003
+Type: Negative
+Title: Unsafe interface address values
+Summary:
+Checks that interface subnet values rendered as unquoted command tokens reject
+whitespace and command-sensitive characters. Static subnet values are preserved
+exactly in valid output, so invalid tokens must fail before templating.
+
+Validates:
+  - Unsafe static interface subnets are rejected
+  - Address validation runs before template rendering
+  - Failure returns normalize_failed
+*/
+func TestRenderRejectsUnsafeInterfaceAddressValues(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN*"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24 delete"},
+				"name": "LAN",
+				"role": "downstream"
+			}
+		]
+	}`)
+
+	_, err := renderPayload(t, payload)
+	assertErrorCode(t, err, CodeNormalizeFailed)
+}
+
+/*
+TC-NORMALIZE-004
+Type: Negative
+Title: Unsafe NAT values
+Summary:
+Checks that NAT fields rendered as unquoted command tokens reject whitespace,
+quotes, and other unsafe characters. These values are preserved exactly in
+valid output, so unsafe values must be stopped during normalization.
+
+Validates:
+  - Unsafe outbound interface names are rejected
+  - Unsafe source or translation addresses are rejected
+  - Failures return normalize_failed
+*/
+func TestRenderRejectsUnsafeNATValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name: "unsafe outbound interface",
+			payload: []byte(`{
+				"nat": {
+					"snat": {
+						"rules": [{
+							"rule-id": 100,
+							"out-interface": {"name": "br0;delete"},
+							"source": {"address": "192.168.60.0/24"},
+							"translation": {"address": "masquerade"}
+						}]
+					}
+				}
+			}`),
+		},
+		{
+			name: "unsafe source address",
+			payload: []byte(`{
+				"nat": {
+					"snat": {
+						"rules": [{
+							"rule-id": 100,
+							"out-interface": {"name": "br0"},
+							"source": {"address": "192.168.60.0/24 delete"},
+							"translation": {"address": "masquerade"}
+						}]
+					}
+				}
+			}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := renderPayload(t, tc.payload)
+			assertErrorCode(t, err, CodeNormalizeFailed)
+		})
+	}
+}
+
+/*
+TC-NORMALIZE-005
+Type: Negative
+Title: NAT alias conflicts
+Summary:
+Ensures accepted NAT aliases cannot provide contradictory values in the same
+rule. The renderer accepts hyphen and snake_case aliases, but conflicting
+values must be rejected to keep normalization deterministic.
+
+Validates:
+  - Conflicting rule-id aliases are rejected
+  - Conflicting out-interface aliases are rejected
+  - Failures return normalize_failed
+*/
+func TestRenderRejectsNATAliasConflicts(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name: "rule ID conflict",
+			payload: []byte(`{
+				"nat": {
+					"snat": {
+						"rules": [{
+							"rule-id": 100,
+							"rule_id": 110,
+							"out-interface": {"name": "br0"},
+							"source": {"address": "192.168.60.0/24"},
+							"translation": {"address": "masquerade"}
+						}]
+					}
+				}
+			}`),
+		},
+		{
+			name: "out interface conflict",
+			payload: []byte(`{
+				"nat": {
+					"snat": {
+						"rules": [{
+							"rule-id": 100,
+							"out-interface": {"name": "br0"},
+							"out_interface": {"name": "br1"},
+							"source": {"address": "192.168.60.0/24"},
+							"translation": {"address": "masquerade"}
+						}]
+					}
+				}
+			}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := renderPayload(t, tc.payload)
+			assertErrorCode(t, err, CodeNormalizeFailed)
+		})
+	}
+}
+
+/*
+TC-NORMALIZE-006
+Type: Negative
+Title: VLAN without downstream bridge
+Summary:
+Verifies that downstream VLAN interfaces require a downstream non-VLAN bridge
+to attach to. A VLAN-only payload has no bridge target for VIF rendering and
+must fail deterministically instead of producing incomplete commands.
+
+Validates:
+  - VLAN-only interface payloads are rejected
+  - Missing downstream bridge returns missing_config
+  - No partial interface output is rendered
+*/
+func TestRenderRejectsVLANWithoutDownstreamBridge(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"name": "LAN.10",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			}
+		]
+	}`)
+
+	_, err := renderPayload(t, payload)
+	assertErrorCode(t, err, CodeMissingConfig)
 }
 
 /*
@@ -269,7 +520,7 @@ func TestRenderGoldenFixtures(t *testing.T) {
 				Target:        "vyos",
 				ConfigUUID:    "cfg-123",
 				SchemaName:    "olg-ucentral",
-				SchemaVersion: "1.0.0",
+				SchemaVersion: "4.2.0",
 				PayloadJSON:   payload,
 			})
 			if err != nil {
@@ -308,7 +559,7 @@ func TestRenderDeterministic(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-123",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   payload,
 	}
 
@@ -346,6 +597,21 @@ func withInput(base Input, mutate func(*Input)) Input {
 	clone := base
 	mutate(&clone)
 	return clone
+}
+
+func renderPayload(t *testing.T, payload []byte) (Output, error) {
+	t.Helper()
+	r, err := New()
+	if err != nil {
+		t.Fatalf("new renderer: %v", err)
+	}
+	return r.Render(context.Background(), Input{
+		Target:        "vyos",
+		ConfigUUID:    "cfg-1",
+		SchemaName:    "olg-ucentral",
+		SchemaVersion: "4.2.0",
+		PayloadJSON:   payload,
+	})
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

@@ -43,7 +43,7 @@ func TestPublicClientRenderFullMVPFlow(t *testing.T) {
 		Target:        "vyos",
 		ConfigUUID:    "cfg-client-sample",
 		SchemaName:    "olg-ucentral",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: "4.2.0",
 		PayloadJSON:   inputJSON,
 	}
 

@@ -237,7 +237,7 @@ func main() {
     Target:        "vyos",
     ConfigUUID:    "cfg-123",
     SchemaName:    "olg-ucentral",
-    SchemaVersion: "1.0.0",
+    SchemaVersion: "4.2.0",
     PayloadJSON:   payload,
   }
 
@@ -484,8 +484,10 @@ Example:
 
 ```text
 supported schema versions:
-- 1.0.0
+- 4.2.0
 ```
+
+The MVP supported version matches the checked-in OLG/uCentral schema metadata in `schemas/ucentral/schema.json`.
 
 Avoid broad min/max ranges until compatibility across versions is understood.
 
@@ -493,8 +495,8 @@ Future support can be added as:
 
 ```text
 supported schema versions:
-- 1.0.0
-- 1.1.0
+- 4.2.0
+- 4.3.0
 ```
 
 or through version-specific normalizers when schema changes require different translation behavior.

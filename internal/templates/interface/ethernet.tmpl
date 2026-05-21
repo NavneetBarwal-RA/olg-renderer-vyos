@@ -1,1 +1,1 @@
-set interfaces ethernet {{ .Name }} description '{{ .Description }}'
+set interfaces ethernet {{ .Name }} description {{ vyosQuote .Description }}

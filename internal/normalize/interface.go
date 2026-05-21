@@ -75,6 +75,10 @@ func normalizeInterfaces(root map[string]json.RawMessage) (InterfacesSection, er
 			continue
 		}
 
+		if err := validateDescription(entry.Name, fmt.Sprintf("interfaces[%d].name", idx)); err != nil {
+			return InterfacesSection{}, newError(CodeNormalizeFailed, err.Error(), nil)
+		}
+
 		portName, err := resolveMappedPort(entry.Ethernet)
 		if err != nil {
 			return InterfacesSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", idx, err), nil)
@@ -88,6 +92,9 @@ func normalizeInterfaces(root map[string]json.RawMessage) (InterfacesSection, er
 			}
 			if entry.IPv4.Subnet == "" {
 				return InterfacesSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: vlan interface requires ipv4.subnet", idx), nil)
+			}
+			if err := validateAddressToken(entry.IPv4.Subnet, fmt.Sprintf("interfaces[%d].ipv4.subnet", idx)); err != nil {
+				return InterfacesSection{}, newError(CodeNormalizeFailed, err.Error(), nil)
 			}
 			pendingVLANs = append(pendingVLANs, pendingVLAN{
 				ID:          entry.VLAN.ID,
@@ -232,6 +239,9 @@ func resolveInterfaceAddress(ipv4 rawIPv4) (string, error) {
 	case "static":
 		if ipv4.Subnet == "" {
 			return "", fmt.Errorf("static ipv4 requires ipv4.subnet")
+		}
+		if err := validateAddressToken(ipv4.Subnet, "ipv4.subnet"); err != nil {
+			return "", err
 		}
 		return ipv4.Subnet, nil
 	case "":

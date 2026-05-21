@@ -2,7 +2,7 @@
   "ucentral": {
     "name": "olg-ucentral",
     "supported_versions": [
-      "1.0.0"
+      "4.2.0"
     ],
     "source_repository": "https://github.com/Telecominfraproject/olg-ucentral-schema/blob/ra_proposal",
     "source_ref": "REPLACE_WITH_PINNED_TAG_OR_COMMIT",

@@ -702,7 +702,13 @@ The renderer must expose supported schema metadata.
 MVP compatibility should use an exact supported-version list:
 
 ```text
-supported_schema_versions = ["1.0.0"]
+supported_schema_versions = ["4.2.0"]
+```
+
+The MVP supported version must match the checked-in OLG/uCentral schema metadata in:
+
+```text
+schemas/ucentral/schema.json
 ```
 
 Do not use broad min/max ranges until compatibility across versions is verified.

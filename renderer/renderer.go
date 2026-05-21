@@ -16,7 +16,7 @@ const (
 	rendererVersion     = "dev"
 	rendererTarget      = "vyos"
 	rendererSchemaName  = "olg-ucentral"
-	rendererSchemaVer10 = "1.0.0"
+	rendererSchemaVer42 = "4.2.0"
 )
 
 // Option mutates renderer construction behavior.
@@ -58,7 +58,7 @@ func GetInfo() Info {
 		Version:                 rendererVersion,
 		Target:                  rendererTarget,
 		SupportedSchemaName:     rendererSchemaName,
-		SupportedSchemaVersions: []string{rendererSchemaVer10},
+		SupportedSchemaVersions: []string{rendererSchemaVer42},
 	}
 }
 

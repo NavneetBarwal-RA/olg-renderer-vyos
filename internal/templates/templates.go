@@ -19,7 +19,8 @@ type Engine struct {
 
 func New() (*Engine, error) {
 	parsed, err := template.New("root").Funcs(template.FuncMap{
-		"dict": dict,
+		"dict":      dict,
+		"vyosQuote": vyosQuote,
 	}).ParseFS(embedFS,
 		"interface.tmpl",
 		"nat.tmpl",
@@ -91,4 +92,13 @@ func dict(values ...any) (map[string]any, error) {
 		out[key] = values[i+1]
 	}
 	return out, nil
+}
+
+func vyosQuote(value string) (string, error) {
+	for _, r := range value {
+		if r == '\'' || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("value cannot be safely single-quoted")
+		}
+	}
+	return "'" + value + "'", nil
 }
