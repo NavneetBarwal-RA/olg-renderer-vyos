@@ -152,12 +152,7 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 		})
 
 		bridge := &bridges[firstDownstreamIdx]
-		seenAllowed := make(map[int]struct{})
 		for _, vlan := range pendingVLANs {
-			if _, exists := seenAllowed[vlan.ID]; !exists {
-				bridge.AllowedVLANs = append(bridge.AllowedVLANs, vlan.ID)
-				seenAllowed[vlan.ID] = struct{}{}
-			}
 			bridge.VIFs = append(bridge.VIFs, VIF{
 				ID:          vlan.ID,
 				Address:     vlan.Address,

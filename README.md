@@ -356,6 +356,7 @@ Expected behavior:
 - upstream non-VLAN interface becomes br0
 - first downstream non-VLAN interface becomes br1
 - downstream VLAN interfaces become VIFs on the downstream bridge
+- allowed-vlan lines are derived from unique sorted VIF IDs
 - static cloud subnet values are preserved exactly
 - physical interface mapping is deterministic and does not inspect the live device
 ```

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -19,8 +20,9 @@ type Engine struct {
 
 func New() (*Engine, error) {
 	parsed, err := template.New("root").Funcs(template.FuncMap{
-		"dict":      dict,
-		"vyosQuote": vyosQuote,
+		"allowedVLANs": allowedVLANs,
+		"dict":         dict,
+		"vyosQuote":    vyosQuote,
 	}).ParseFS(embedFS,
 		"interface.tmpl",
 		"nat.tmpl",
@@ -77,6 +79,20 @@ func normalizeSection(in string) string {
 		return ""
 	}
 	return in + "\n"
+}
+
+func allowedVLANs(vifs []normalize.VIF) []int {
+	seen := make(map[int]struct{}, len(vifs))
+	ids := make([]int, 0, len(vifs))
+	for _, vif := range vifs {
+		if _, exists := seen[vif.ID]; exists {
+			continue
+		}
+		seen[vif.ID] = struct{}{}
+		ids = append(ids, vif.ID)
+	}
+	sort.Ints(ids)
+	return ids
 }
 
 func dict(values ...any) (map[string]any, error) {

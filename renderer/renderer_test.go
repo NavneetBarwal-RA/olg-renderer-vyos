@@ -573,6 +573,76 @@ func TestRenderRejectsVLANWithoutDownstreamBridge(t *testing.T) {
 }
 
 /*
+TC-NORMALIZE-007
+Type: Positive
+Title: Allowed VLANs derived from VIF IDs
+Summary:
+Renders duplicate VLAN IDs to verify allowed-vlan output is derived from
+unique sorted VIF IDs. The VIF commands remain deterministic, while the bridge
+member receives only one allowed-vlan line for the duplicated VLAN ID.
+
+Validates:
+  - VIFs are the single source of truth for VLAN IDs
+  - Duplicate VIF IDs generate one allowed-vlan line
+  - VIF rendering remains deterministic
+*/
+func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN*"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"name": "LAN",
+				"role": "downstream"
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"name": "LAN.10A",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.2/24"},
+				"name": "LAN.10B",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			}
+		]
+	}`)
+
+	out, err := renderPayload(t, payload)
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	if count := strings.Count(out.RenderedText, "set interfaces bridge br1 member interface eth1 allowed-vlan 10\n"); count != 1 {
+		t.Fatalf("expected one allowed-vlan 10 line, got %d\n%s", count, out.RenderedText)
+	}
+
+	expectedOrder := []string{
+		"set interfaces bridge br1 member interface eth1 allowed-vlan 10",
+		"set interfaces bridge br1 member interface eth1 native-vlan 1",
+		"set interfaces bridge br1 vif 10 address 192.168.10.1/24",
+		"set interfaces bridge br1 vif 10 description 'LAN.10A'",
+		"set interfaces bridge br1 vif 10 address 192.168.10.2/24",
+		"set interfaces bridge br1 vif 10 description 'LAN.10B'",
+	}
+	last := -1
+	for _, line := range expectedOrder {
+		idx := strings.Index(out.RenderedText, line)
+		if idx < 0 {
+			t.Fatalf("expected output to contain %q\n%s", line, out.RenderedText)
+		}
+		if idx <= last {
+			t.Fatalf("expected %q after previous line\n%s", line, out.RenderedText)
+		}
+		last = idx
+	}
+}
+
+/*
 TC-GOLDEN-001
 Type: Positive
 Title: Golden fixture rendering

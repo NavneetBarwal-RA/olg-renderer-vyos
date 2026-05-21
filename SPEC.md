@@ -371,6 +371,7 @@ ipv4.subnet
 - additional downstream non-VLAN interfaces map to br2, br3, ...
 - top-level VLAN interfaces are not rendered as separate bridges
 - downstream VLAN interfaces are rendered as VIFs on the downstream bridge
+- allowed-vlan lines are derived from unique sorted VIF IDs
 - static subnet values from the cloud payload must be preserved exactly
 - physical interface mapping must be deterministic
 ```
@@ -463,6 +464,7 @@ Ordering requirements:
 - bridge commands before ethernet commands
 - br0 before br1
 - VIFs sorted by VLAN ID
+- allowed-vlan lines sorted by unique VIF ID
 - ethernet interfaces sorted by interface name
 ```
 
@@ -632,6 +634,7 @@ Normalization owns:
 ```
 
 Templates should not contain business mapping decisions.
+Templates derive bridge `allowed-vlan` command lines from unique sorted VIF IDs.
 
 Port mapping ownership:
 

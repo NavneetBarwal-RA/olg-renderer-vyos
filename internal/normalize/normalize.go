@@ -63,11 +63,10 @@ type Bridge struct {
 	Description     string
 	MemberInterface string
 	EnableVLAN      bool
-	AllowedVLANs    []int
 	VIFs            []VIF
 }
 
-// VIF describes one normalized bridge VIF.
+// VIF describes one normalized bridge VIF. Allowed VLAN output is derived from unique sorted VIF IDs.
 type VIF struct {
 	ID          int
 	Address     string
