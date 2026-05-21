@@ -195,6 +195,62 @@ func TestRenderInvalidJSON(t *testing.T) {
 }
 
 /*
+TC-INPUT-003
+Type: Positive
+Title: Wrapper payload is not unwrapped
+Summary:
+Documents the canonical payload contract by passing a non-canonical wrapper
+object with config.interfaces inside it. The renderer should treat the wrapper
+as the payload root and should not render nested config data.
+
+Validates:
+  - Renderer expects top-level interfaces and nat
+  - Wrapper payloads under $.config are not unwrapped
+  - Agent adapters must pass the inner config object
+*/
+func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
+	r, err := New()
+	if err != nil {
+		t.Fatalf("new renderer: %v", err)
+	}
+
+	out, err := r.Render(context.Background(), Input{
+		Target:        "vyos",
+		ConfigUUID:    "cfg-1",
+		SchemaName:    "olg-ucentral",
+		SchemaVersion: "4.2.0",
+		PayloadJSON: []byte(`{
+			"config": {
+				"interfaces": [
+					{
+						"ethernet": [{"select-ports": ["WAN*"]}],
+						"ipv4": {"addressing": "dynamic"},
+						"name": "WAN",
+						"role": "upstream"
+					}
+				],
+				"nat": {
+					"snat": {
+						"rules": [{
+							"rule-id": 100,
+							"out-interface": {"name": "br0"},
+							"source": {"address": "192.168.60.0/24"},
+							"translation": {"address": "masquerade"}
+						}]
+					}
+				}
+			}
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+	if out.RenderedText != "" {
+		t.Fatalf("expected wrapper payload not to render nested config, got:\n%s", out.RenderedText)
+	}
+}
+
+/*
 TC-META-001
 Type: Negative
 Title: Payload metadata mismatch

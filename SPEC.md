@@ -127,6 +127,8 @@ Facade rules:
 
 ```text
 - PayloadJSON must be the actual OLG/uCentral desired config object, not the full NATS KV record.
+- PayloadJSON must not be a wrapper object containing the desired config under $.config.
+- The renderer must not automatically unwrap $.config.
 - RenderedText must be VyOS CLI set-command text only.
 - RenderedText must not include configure/commit/save/delete/show commands.
 - The agent adapter maps agentcore.StoredDesiredConfig into renderer.Input.
@@ -181,9 +183,20 @@ Example shape:
 }
 ```
 
-The renderer does not expect the NATS KV record shape.
+The renderer does not expect the NATS KV record shape and does not unwrap `$.config`.
 
-If the desired config is wrapped by another component, the agent adapter must pass the actual OLG/uCentral config object to the renderer.
+Non-canonical upstream wrapper shape:
+
+```json
+{
+  "config": {
+    "interfaces": [],
+    "nat": {}
+  }
+}
+```
+
+If the desired config is wrapped by another component, the agent adapter must pass only the actual OLG/uCentral config object to the renderer.
 
 ### Optional payload metadata
 

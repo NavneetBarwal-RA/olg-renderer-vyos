@@ -147,7 +147,20 @@ For the MVP, `payload_json` is the raw OLG/uCentral config object, for example:
 }
 ```
 
-If an upstream component stores or transports the desired config inside a wrapper, the agent adapter should unwrap it before calling the renderer.
+The renderer does not consume the full NATS/KV record and does not unwrap wrapper fields such as `$.config`.
+
+If an upstream component stores or transports the desired config inside a wrapper such as:
+
+```json
+{
+  "config": {
+    "interfaces": [],
+    "nat": {}
+  }
+}
+```
+
+the agent adapter must pass only the inner config object to `renderer.Input.PayloadJSON`.
 
 ---
 
