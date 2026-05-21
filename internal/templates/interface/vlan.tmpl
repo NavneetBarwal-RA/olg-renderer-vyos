@@ -1,0 +1,4 @@
+set interfaces bridge {{ .BridgeName }} vif {{ .VIF.ID }} address {{ .VIF.Address }}
+{{- if .VIF.Description }}
+set interfaces bridge {{ .BridgeName }} vif {{ .VIF.ID }} description '{{ .VIF.Description }}'
+{{- end }}

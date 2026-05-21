@@ -1,0 +1,23 @@
+{
+  "ucentral": {
+    "name": "olg-ucentral",
+    "supported_versions": [
+      "4.2.0"
+    ],
+    "source_repository": "https://github.com/Telecominfraproject/olg-ucentral-schema/blob/ra_proposal",
+    "source_ref": "REPLACE_WITH_PINNED_TAG_OR_COMMIT",
+    "version_file": "schemas/ucentral/schema.json",
+    "schema_file": "schemas/ucentral/ucentral.schema.full.json",
+    "schema_sha256": "REPLACE_WITH_SHA256",
+    "runtime_fetch": false
+  },
+  "vyos": {
+    "name": "vyos-config-schema",
+    "target": "vyos",
+    "source": "manual-snapshot-for-mvp",
+    "source_ref": "REPLACE_WITH_VYOS_BUILD_REF_WHEN_AVAILABLE",
+    "schema_file": "schemas/vyos/vyos-config-schema.json",
+    "schema_sha256": "REPLACE_WITH_SHA256",
+    "runtime_fetch": false
+  }
+}

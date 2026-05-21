@@ -1,0 +1,5 @@
+{{- range .Rules }}
+set nat source rule {{ .RuleID }} outbound-interface name {{ .OutboundInterface }}
+set nat source rule {{ .RuleID }} source address {{ .SourceAddress }}
+set nat source rule {{ .RuleID }} translation address {{ .TranslationAddress }}
+{{- end }}

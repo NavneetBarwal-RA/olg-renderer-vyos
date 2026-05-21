@@ -1,0 +1,45 @@
+{
+  "nat": {
+    "snat": {
+      "rules": [
+        {
+          "out-interface": {
+            "name": "br0"
+          },
+          "rule-id": 100,
+          "source": {
+            "address": "192.168.60.0/24"
+          },
+          "translation": {
+            "address": "masquerade"
+          }
+        },
+        {
+          "out-interface": {
+            "name": "br0"
+          },
+          "rule-id": 110,
+          "source": {
+            "address": "192.168.10.0/24"
+          },
+          "translation": {
+            "address": "masquerade"
+          }
+        },
+        {
+          "out-interface": {
+            "name": "br0"
+          },
+          "rule-id": 120,
+          "source": {
+            "address": "192.168.20.0/24"
+          },
+          "translation": {
+            "address": "masquerade"
+          }
+        }
+      ]
+    }
+  },
+  "uuid": 1770891457
+}
