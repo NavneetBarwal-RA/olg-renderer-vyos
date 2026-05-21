@@ -21,7 +21,7 @@ func validateDescription(value, path string) error {
 	return nil
 }
 
-func validateInterfaceToken(value, path string) error {
+func ValidateInterfaceToken(value, path string) error {
 	return validateToken(value, path, false)
 }
 

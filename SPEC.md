@@ -70,6 +70,8 @@ package renderer
 
 func New(opts ...Option) (*Renderer, error)
 
+func WithPortMap(map[string]string) Option
+
 func (r *Renderer) Render(ctx context.Context, input Input) (Output, error)
 
 func GetInfo() Info
@@ -373,7 +375,7 @@ ipv4.subnet
 - physical interface mapping must be deterministic
 ```
 
-Example physical mapping for MVP fixtures:
+Default physical mapping for MVP fixtures:
 
 ```text
 WAN* -> eth0
@@ -382,7 +384,7 @@ LAN1 -> eth1
 LAN2 -> eth1
 ```
 
-If production mapping differs, it must be provided by renderer configuration or agent adapter input. The renderer must not discover live device interfaces.
+If production mapping differs, the agent or device-profile layer must resolve it before calling the renderer and pass it with `renderer.WithPortMap`. The renderer must not discover live device interfaces, read mapping files, or add runtime filesystem dependencies.
 
 ---
 
@@ -596,12 +598,22 @@ Normalization owns:
 - interface role filtering
 - bridge naming
 - VLAN/VIF grouping
-- physical port mapping
+- consuming renderer-configured physical port mapping
 - NAT rule normalization
 - deterministic sorting
 ```
 
 Templates should not contain business mapping decisions.
+
+Port mapping ownership:
+
+```text
+- renderer.New() installs the default MVP fixture mapping
+- renderer.WithPortMap(map[string]string) extends or overrides that mapping
+- WithPortMap defensively copies caller input
+- future agent/device-profile code may load mapping from files or inventory
+- loaded mapping must be passed into the renderer; the renderer must not load it itself
+```
 
 ---
 
@@ -689,9 +701,9 @@ Manual renderer logic defines mappings such as:
 upstream -> br0
 downstream -> br1
 VLAN downstream -> bridge VIF
-WAN* -> eth0
-LAN* -> eth1
 ```
+
+Physical selector mapping is renderer configuration, not live device discovery. The MVP default mapping is used for fixtures, and production mapping should be supplied through `WithPortMap`.
 
 ---
 

@@ -35,14 +35,7 @@ type pendingVLAN struct {
 	Description string
 }
 
-var mvpPortMap = map[string]string{
-	"WAN*": "eth0",
-	"LAN*": "eth1",
-	"LAN1": "eth1",
-	"LAN2": "eth1",
-}
-
-func normalizeInterfaces(root map[string]json.RawMessage) (InterfacesSection, error) {
+func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]string) (InterfacesSection, error) {
 	rawInterfaces, ok := root["interfaces"]
 	if !ok {
 		return InterfacesSection{}, nil
@@ -79,7 +72,7 @@ func normalizeInterfaces(root map[string]json.RawMessage) (InterfacesSection, er
 			return InterfacesSection{}, newError(CodeNormalizeFailed, err.Error(), nil)
 		}
 
-		portName, err := resolveMappedPort(entry.Ethernet)
+		portName, err := resolveMappedPort(entry.Ethernet, portMap)
 		if err != nil {
 			return InterfacesSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", idx, err), nil)
 		}
@@ -216,14 +209,14 @@ func rejectInterfaceAliases(rawEntry json.RawMessage) error {
 	return nil
 }
 
-func resolveMappedPort(ethernet []rawEthernet) (string, error) {
+func resolveMappedPort(ethernet []rawEthernet, portMap map[string]string) (string, error) {
 	if len(ethernet) == 0 {
 		return "", fmt.Errorf("missing ethernet[]")
 	}
 
 	for _, eth := range ethernet {
 		for _, selector := range eth.SelectPorts {
-			if mapped, ok := mvpPortMap[selector]; ok {
+			if mapped, ok := portMap[selector]; ok {
 				return mapped, nil
 			}
 		}

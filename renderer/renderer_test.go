@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -230,6 +231,94 @@ func TestRenderPayloadMetadataMismatch(t *testing.T) {
 		PayloadJSON:   payload,
 	})
 	assertErrorCode(t, err, CodeMetadataMismatch)
+}
+
+/*
+TC-OPTION-001
+Type: Positive
+Title: Custom port map override
+Summary:
+Verifies that clients can override the default MVP selector mapping through
+WithPortMap without changing payload shape. The test renders the basic
+interface fixture with WAN* and LAN* mapped to custom ethernet interfaces.
+
+Validates:
+  - WithPortMap overrides default selector mappings
+  - Rendered bridge member commands use the custom interfaces
+  - Renderer defensively copies caller-provided map values
+*/
+func TestRenderWithCustomPortMap(t *testing.T) {
+	portMap := map[string]string{
+		"WAN*": "eth10",
+		"LAN*": "eth9",
+	}
+
+	r, err := New(WithPortMap(portMap))
+	if err != nil {
+		t.Fatalf("new renderer with port map: %v", err)
+	}
+
+	portMap["WAN*"] = "eth99"
+
+	payload := mustReadFile(t, filepath.Join("..", "testdata", "valid", "interface-basic.json"))
+	out, err := r.Render(context.Background(), Input{
+		Target:        "vyos",
+		ConfigUUID:    "cfg-123",
+		SchemaName:    "olg-ucentral",
+		SchemaVersion: "4.2.0",
+		PayloadJSON:   payload,
+	})
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	expectedLines := []string{
+		"set interfaces bridge br0 member interface eth10",
+		"set interfaces bridge br1 member interface eth9",
+		"set interfaces ethernet eth10 description 'WAN'",
+		"set interfaces ethernet eth9 description 'LAN'",
+	}
+	for _, line := range expectedLines {
+		if !strings.Contains(out.RenderedText, line) {
+			t.Fatalf("expected rendered output to contain %q\nactual:\n%s", line, out.RenderedText)
+		}
+	}
+	if strings.Contains(out.RenderedText, "eth99") {
+		t.Fatalf("renderer used mutated caller map value:\n%s", out.RenderedText)
+	}
+}
+
+/*
+TC-OPTION-002
+Type: Negative
+Title: Invalid custom port map
+Summary:
+Ensures WithPortMap rejects invalid caller-provided mapping entries during
+renderer construction. Invalid maps should fail before rendering starts so
+callers get a stable typed input error.
+
+Validates:
+  - Nil port maps are rejected
+  - Empty selectors and empty interface names are rejected
+  - Unsafe interface token values are rejected
+*/
+func TestNewRejectsInvalidPortMap(t *testing.T) {
+	tests := []struct {
+		name    string
+		portMap map[string]string
+	}{
+		{name: "nil map", portMap: nil},
+		{name: "empty selector", portMap: map[string]string{"": "eth0"}},
+		{name: "empty interface", portMap: map[string]string{"WAN*": ""}},
+		{name: "unsafe interface", portMap: map[string]string{"WAN*": "eth0;delete"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(WithPortMap(tc.portMap))
+			assertErrorCode(t, err, CodeInvalidInput)
+		})
+	}
 }
 
 /*

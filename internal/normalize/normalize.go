@@ -94,8 +94,8 @@ type NATRule struct {
 }
 
 // Normalize converts decoded payload fields into template-ready data.
-func Normalize(root map[string]json.RawMessage) (RenderData, error) {
-	interfaces, err := normalizeInterfaces(root)
+func Normalize(root map[string]json.RawMessage, portMap map[string]string) (RenderData, error) {
+	interfaces, err := normalizeInterfaces(root, portMap)
 	if err != nil {
 		return RenderData{}, err
 	}

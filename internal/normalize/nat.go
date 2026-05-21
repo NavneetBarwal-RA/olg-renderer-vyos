@@ -73,7 +73,7 @@ func normalizeNATRule(rawRule json.RawMessage) (NATRule, error) {
 	if err != nil {
 		return NATRule{}, err
 	}
-	if err := validateInterfaceToken(outbound, "out-interface.name"); err != nil {
+	if err := ValidateInterfaceToken(outbound, "out-interface.name"); err != nil {
 		return NATRule{}, err
 	}
 
