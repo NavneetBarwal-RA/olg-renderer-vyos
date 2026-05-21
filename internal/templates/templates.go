@@ -20,9 +20,9 @@ type Engine struct {
 
 func New() (*Engine, error) {
 	parsed, err := template.New("root").Funcs(template.FuncMap{
-		"allowedVLANs": allowedVLANs,
-		"dict":         dict,
-		"vyosQuote":    vyosQuote,
+		"allowedVLANsForMember": allowedVLANsForMember,
+		"dict":                  dict,
+		"vyosQuote":             vyosQuote,
 	}).ParseFS(embedFS,
 		"interface.tmpl",
 		"nat.tmpl",
@@ -81,10 +81,13 @@ func normalizeSection(in string) string {
 	return in + "\n"
 }
 
-func allowedVLANs(vifs []normalize.VIF) []int {
+func allowedVLANsForMember(vifs []normalize.VIF, member string) []int {
 	seen := make(map[int]struct{}, len(vifs))
 	ids := make([]int, 0, len(vifs))
 	for _, vif := range vifs {
+		if !vifIncludesMember(vif, member) {
+			continue
+		}
 		if _, exists := seen[vif.ID]; exists {
 			continue
 		}
@@ -93,6 +96,15 @@ func allowedVLANs(vifs []normalize.VIF) []int {
 	}
 	sort.Ints(ids)
 	return ids
+}
+
+func vifIncludesMember(vif normalize.VIF, member string) bool {
+	for _, candidate := range vif.MemberInterfaces {
+		if candidate == member {
+			return true
+		}
+	}
+	return false
 }
 
 func dict(values ...any) (map[string]any, error) {

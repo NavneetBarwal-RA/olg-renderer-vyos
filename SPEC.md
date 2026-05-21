@@ -70,7 +70,7 @@ package renderer
 
 func New(opts ...Option) (*Renderer, error)
 
-func WithPortMap(map[string]string) Option
+func WithPortMap(map[string][]string) Option
 
 func (r *Renderer) Render(ctx context.Context, input Input) (Output, error)
 
@@ -384,21 +384,22 @@ ipv4.subnet
 - additional downstream non-VLAN interfaces map to br2, br3, ...
 - top-level VLAN interfaces are not rendered as separate bridges
 - downstream VLAN interfaces are rendered as VIFs on the downstream bridge
-- allowed-vlan lines are derived from unique sorted VIF IDs
+- allowed-vlan lines are derived from VIF IDs and VIF member-interface membership
 - static subnet values from the cloud payload must be preserved exactly
 - physical interface mapping must be deterministic
+- ethernet descriptions prefer base non-VLAN interface names over VLAN/VIF names
 ```
 
 Default physical mapping for MVP fixtures:
 
 ```text
 WAN* -> eth0
-LAN* -> eth1
+LAN* -> eth1, eth2
 LAN1 -> eth1
-LAN2 -> eth1
+LAN2 -> eth2
 ```
 
-If production mapping differs, the agent or device-profile layer must resolve it before calling the renderer and pass it with `renderer.WithPortMap`. The renderer must not discover live device interfaces, read mapping files, or add runtime filesystem dependencies.
+`LAN*` is a group/wildcard selector in the default MVP fixture mapping. If production mapping differs, the agent or device-profile layer must resolve it before calling the renderer and pass it with `renderer.WithPortMap`. The renderer must not discover live device interfaces, read mapping files, or add runtime filesystem dependencies.
 
 ---
 
@@ -464,11 +465,14 @@ set interfaces bridge br0 member interface eth0
 set interfaces bridge br1 address 192.168.60.1/24
 set interfaces bridge br1 description 'LAN'
 set interfaces bridge br1 enable-vlan
-set interfaces bridge br1 member interface eth1 allowed-vlan 10
+set interfaces bridge br1 member interface eth1
+set interfaces bridge br1 member interface eth2 allowed-vlan 10
+set interfaces bridge br1 member interface eth2 native-vlan 1
 set interfaces bridge br1 vif 10 address 192.168.10.1/24
 set interfaces bridge br1 vif 10 description 'LAN.10'
 set interfaces ethernet eth0 description 'WAN'
 set interfaces ethernet eth1 description 'LAN'
+set interfaces ethernet eth2 description 'LAN'
 ```
 
 Ordering requirements:
@@ -477,7 +481,8 @@ Ordering requirements:
 - bridge commands before ethernet commands
 - br0 before br1
 - VIFs sorted by VLAN ID
-- allowed-vlan lines sorted by unique VIF ID
+- bridge member interfaces sorted by interface name
+- allowed-vlan lines sorted by member interface, then VLAN ID
 - ethernet interfaces sorted by interface name
 ```
 
@@ -646,14 +651,15 @@ Normalization owns:
 ```
 
 Templates should not contain business mapping decisions.
-Templates derive bridge `allowed-vlan` command lines from unique sorted VIF IDs.
+Templates derive bridge `allowed-vlan` command lines from VIF IDs and VIF member-interface membership.
 
 Port mapping ownership:
 
 ```text
 - renderer.New() installs the default MVP fixture mapping
-- renderer.WithPortMap(map[string]string) extends or overrides that mapping
-- WithPortMap defensively copies caller input
+- renderer.WithPortMap(map[string][]string) extends or overrides that mapping
+- WithPortMap defensively copies caller map and slice input
+- WithPortMap deduplicates and sorts physical interfaces per selector
 - future agent/device-profile code may load mapping from files or inventory
 - loaded mapping must be passed into the renderer; the renderer must not load it itself
 ```

@@ -102,7 +102,7 @@ Expected public API:
 
 ```go
 func New(opts ...Option) (*Renderer, error)
-func WithPortMap(map[string]string) Option
+func WithPortMap(map[string][]string) Option
 func (r *Renderer) Render(ctx context.Context, input Input) (Output, error)
 func GetInfo() Info
 func (r *Renderer) Info() Info
@@ -268,13 +268,13 @@ func main() {
 Port mapping:
 
 ```go
-r, err := renderer.New(renderer.WithPortMap(map[string]string{
-  "WAN*": "eth10",
-  "LAN*": "eth9",
+r, err := renderer.New(renderer.WithPortMap(map[string][]string{
+  "WAN*": []string{"eth10"},
+  "LAN*": []string{"eth8", "eth9"},
 }))
 ```
 
-`WithPortMap` extends or overrides the default MVP fixture mapping. The renderer only consumes the provided mapping; it does not read mapping files, inspect live interfaces, or fetch device inventory. Production VyOS agent or device-profile code may load mapping data from files, inventory, or another source and pass the resolved map into the renderer.
+`WithPortMap` extends or overrides the default MVP fixture mapping. A selector can resolve to one or more physical interfaces; for example, `LAN*` is a group/wildcard selector. The renderer only consumes the provided mapping; it does not read mapping files, inspect live interfaces, or fetch device inventory. Production VyOS agent or device-profile code may load mapping data from files, inventory, or another source and pass the resolved map into the renderer.
 
 For a full end-to-end sample using the canonical `full-mvp` fixture, run:
 
@@ -369,9 +369,10 @@ Expected behavior:
 - upstream non-VLAN interface becomes br0
 - first downstream non-VLAN interface becomes br1
 - downstream VLAN interfaces become VIFs on the downstream bridge
-- allowed-vlan lines are derived from unique sorted VIF IDs
+- allowed-vlan lines are derived from VIF IDs and VIF member-interface membership
 - static cloud subnet values are preserved exactly
 - physical interface mapping is deterministic and does not inspect the live device
+- ethernet descriptions prefer base non-VLAN interface names over VLAN/VIF names
 ```
 
 Example output:
@@ -383,20 +384,23 @@ set interfaces bridge br0 member interface eth0
 set interfaces bridge br1 address 192.168.60.1/24
 set interfaces bridge br1 description 'LAN'
 set interfaces bridge br1 enable-vlan
-set interfaces bridge br1 member interface eth1 allowed-vlan 10
+set interfaces bridge br1 member interface eth1
+set interfaces bridge br1 member interface eth2 allowed-vlan 10
+set interfaces bridge br1 member interface eth2 native-vlan 1
 set interfaces bridge br1 vif 10 address 192.168.10.1/24
 set interfaces bridge br1 vif 10 description 'LAN.10'
 set interfaces ethernet eth0 description 'WAN'
 set interfaces ethernet eth1 description 'LAN'
+set interfaces ethernet eth2 description 'LAN'
 ```
 
 Default MVP fixture mapping:
 
 ```text
 WAN* -> eth0
-LAN* -> eth1
+LAN* -> eth1, eth2
 LAN1 -> eth1
-LAN2 -> eth1
+LAN2 -> eth2
 ```
 
 Production mapping should be resolved by the agent or device-profile layer and passed into the renderer with `WithPortMap`. The renderer must remain side-effect free and must not load mapping files or inspect the live device.

@@ -1,9 +1,9 @@
 set interfaces bridge {{ .Name }} address {{ .Address }}
 set interfaces bridge {{ .Name }} description {{ vyosQuote .Description }}
 {{if .EnableVLAN}}set interfaces bridge {{ .Name }} enable-vlan
-{{end}}{{if .MemberInterface}}{{ $allowedVLANs := allowedVLANs .VIFs }}{{if $allowedVLANs}}{{range $allowedVLANs}}set interfaces bridge {{ $.Name }} member interface {{ $.MemberInterface }} allowed-vlan {{ . }}
-{{end}}set interfaces bridge {{ .Name }} member interface {{ .MemberInterface }} native-vlan 1
-{{else}}set interfaces bridge {{ .Name }} member interface {{ .MemberInterface }}
-{{end}}{{end}}{{ $bridge := . }}{{range .VIFs}}set interfaces bridge {{ $bridge.Name }} vif {{ .ID }} address {{ .Address }}
+{{end}}{{ $bridge := . }}{{range .MemberInterfaces}}{{ $member := . }}{{ $allowedVLANs := allowedVLANsForMember $bridge.VIFs $member }}{{if $allowedVLANs}}{{range $allowedVLANs}}set interfaces bridge {{ $bridge.Name }} member interface {{ $member }} allowed-vlan {{ . }}
+{{end}}set interfaces bridge {{ $bridge.Name }} member interface {{ $member }} native-vlan 1
+{{else}}set interfaces bridge {{ $bridge.Name }} member interface {{ $member }}
+{{end}}{{end}}{{range .VIFs}}set interfaces bridge {{ $bridge.Name }} vif {{ .ID }} address {{ .Address }}
 set interfaces bridge {{ $bridge.Name }} vif {{ .ID }} description {{ vyosQuote .Description }}
 {{end -}}

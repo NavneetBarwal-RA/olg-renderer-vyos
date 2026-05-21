@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 type rawInterface struct {
@@ -30,12 +31,23 @@ type rawVLAN struct {
 }
 
 type pendingVLAN struct {
-	ID          int
-	Address     string
-	Description string
+	ID               int
+	Address          string
+	Description      string
+	MemberInterfaces []string
 }
 
-func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]string) (InterfacesSection, error) {
+type ethernetDescription struct {
+	description string
+	priority    int
+}
+
+const (
+	ethernetDescriptionPriorityVLAN = iota
+	ethernetDescriptionPriorityBase
+)
+
+func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]string) (InterfacesSection, error) {
 	rawInterfaces, ok := root["interfaces"]
 	if !ok {
 		return InterfacesSection{}, nil
@@ -47,7 +59,7 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 	}
 
 	bridges := make([]Bridge, 0)
-	ethDescriptions := make(map[string]string)
+	ethDescriptions := make(map[string]ethernetDescription)
 	pendingVLANs := make([]pendingVLAN, 0)
 
 	hasUpstreamBridge := false
@@ -72,7 +84,7 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 			return InterfacesSection{}, newError(CodeNormalizeFailed, err.Error(), nil)
 		}
 
-		portName, err := resolveMappedPort(entry.Ethernet, portMap)
+		portNames, err := resolveMappedPorts(entry.Ethernet, portMap)
 		if err != nil {
 			return InterfacesSection{}, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", idx, err), nil)
 		}
@@ -90,12 +102,13 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 				return InterfacesSection{}, newError(CodeNormalizeFailed, err.Error(), nil)
 			}
 			pendingVLANs = append(pendingVLANs, pendingVLAN{
-				ID:          entry.VLAN.ID,
-				Address:     entry.IPv4.Subnet,
-				Description: entry.Name,
+				ID:               entry.VLAN.ID,
+				Address:          entry.IPv4.Subnet,
+				Description:      entry.Name,
+				MemberInterfaces: portNames,
 			})
-			if _, exists := ethDescriptions[portName]; !exists && entry.Name != "" {
-				ethDescriptions[portName] = entry.Name
+			for _, portName := range portNames {
+				updateEthernetDescription(ethDescriptions, portName, entry.Name, ethernetDescriptionPriorityVLAN)
 			}
 			continue
 		}
@@ -112,20 +125,20 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 			}
 			hasUpstreamBridge = true
 			bridges = append(bridges, Bridge{
-				Name:            "br0",
-				Address:         address,
-				Description:     entry.Name,
-				MemberInterface: portName,
-				EnableVLAN:      false,
+				Name:             "br0",
+				Address:          address,
+				Description:      entry.Name,
+				MemberInterfaces: portNames,
+				EnableVLAN:       false,
 			})
 		case "downstream":
 			bridgeName := "br" + strconv.Itoa(downstreamCount+1)
 			bridge := Bridge{
-				Name:            bridgeName,
-				Address:         address,
-				Description:     entry.Name,
-				MemberInterface: portName,
-				EnableVLAN:      true,
+				Name:             bridgeName,
+				Address:          address,
+				Description:      entry.Name,
+				MemberInterfaces: portNames,
+				EnableVLAN:       true,
 			}
 			bridges = append(bridges, bridge)
 			if firstDownstreamIdx < 0 {
@@ -134,8 +147,8 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 			downstreamCount++
 		}
 
-		if _, exists := ethDescriptions[portName]; !exists && entry.Name != "" {
-			ethDescriptions[portName] = entry.Name
+		for _, portName := range portNames {
+			updateEthernetDescription(ethDescriptions, portName, entry.Name, ethernetDescriptionPriorityBase)
 		}
 	}
 
@@ -146,6 +159,9 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 
 		sort.Slice(pendingVLANs, func(i, j int) bool {
 			if pendingVLANs[i].ID == pendingVLANs[j].ID {
+				if pendingVLANs[i].Description == pendingVLANs[j].Description {
+					return strings.Join(pendingVLANs[i].MemberInterfaces, ",") < strings.Join(pendingVLANs[j].MemberInterfaces, ",")
+				}
 				return pendingVLANs[i].Description < pendingVLANs[j].Description
 			}
 			return pendingVLANs[i].ID < pendingVLANs[j].ID
@@ -153,10 +169,12 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 
 		bridge := &bridges[firstDownstreamIdx]
 		for _, vlan := range pendingVLANs {
+			bridge.MemberInterfaces = mergeSortedUniqueStrings(bridge.MemberInterfaces, vlan.MemberInterfaces)
 			bridge.VIFs = append(bridge.VIFs, VIF{
-				ID:          vlan.ID,
-				Address:     vlan.Address,
-				Description: vlan.Description,
+				ID:               vlan.ID,
+				Address:          vlan.Address,
+				Description:      vlan.Description,
+				MemberInterfaces: vlan.MemberInterfaces,
 			})
 		}
 	}
@@ -167,7 +185,7 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string]str
 
 	ethernets := make([]Ethernet, 0, len(ethDescriptions))
 	for name, description := range ethDescriptions {
-		ethernets = append(ethernets, Ethernet{Name: name, Description: description})
+		ethernets = append(ethernets, Ethernet{Name: name, Description: description.description})
 	}
 	sort.Slice(ethernets, func(i, j int) bool {
 		return ethernets[i].Name < ethernets[j].Name
@@ -204,20 +222,66 @@ func rejectInterfaceAliases(rawEntry json.RawMessage) error {
 	return nil
 }
 
-func resolveMappedPort(ethernet []rawEthernet, portMap map[string]string) (string, error) {
+func resolveMappedPorts(ethernet []rawEthernet, portMap map[string][]string) ([]string, error) {
 	if len(ethernet) == 0 {
-		return "", fmt.Errorf("missing ethernet[]")
+		return nil, fmt.Errorf("missing ethernet[]")
 	}
 
+	seen := make(map[string]struct{})
+	ports := make([]string, 0)
 	for _, eth := range ethernet {
 		for _, selector := range eth.SelectPorts {
-			if mapped, ok := portMap[selector]; ok {
-				return mapped, nil
+			mapped, ok := portMap[selector]
+			if !ok {
+				continue
+			}
+			for _, port := range mapped {
+				if _, exists := seen[port]; exists {
+					continue
+				}
+				seen[port] = struct{}{}
+				ports = append(ports, port)
 			}
 		}
 	}
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("missing or unsupported ethernet[].select-ports[]")
+	}
+	sort.Strings(ports)
+	return ports, nil
+}
 
-	return "", fmt.Errorf("missing or unsupported ethernet[].select-ports[]")
+func updateEthernetDescription(descriptions map[string]ethernetDescription, portName, description string, priority int) {
+	if description == "" {
+		return
+	}
+	current, exists := descriptions[portName]
+	// Base/non-VLAN descriptions intentionally outrank VLAN descriptions.
+	// For equal priority, keep the first stable input-order value.
+	if !exists || priority > current.priority {
+		descriptions[portName] = ethernetDescription{description: description, priority: priority}
+	}
+}
+
+func mergeSortedUniqueStrings(left, right []string) []string {
+	seen := make(map[string]struct{}, len(left)+len(right))
+	merged := make([]string, 0, len(left)+len(right))
+	for _, value := range left {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	for _, value := range right {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	sort.Strings(merged)
+	return merged
 }
 
 func resolveInterfaceAddress(ipv4 rawIPv4) (string, error) {

@@ -4,12 +4,14 @@ set interfaces bridge br0 member interface eth0
 set interfaces bridge br1 address 192.168.60.1/24
 set interfaces bridge br1 description 'LAN'
 set interfaces bridge br1 enable-vlan
-set interfaces bridge br1 member interface eth1 allowed-vlan 10
 set interfaces bridge br1 member interface eth1 allowed-vlan 20
 set interfaces bridge br1 member interface eth1 native-vlan 1
+set interfaces bridge br1 member interface eth2 allowed-vlan 10
+set interfaces bridge br1 member interface eth2 native-vlan 1
 set interfaces bridge br1 vif 10 address 192.168.10.1/24
 set interfaces bridge br1 vif 10 description 'LAN.10'
 set interfaces bridge br1 vif 20 address 192.168.20.1/24
 set interfaces bridge br1 vif 20 description 'LAN.20'
 set interfaces ethernet eth0 description 'WAN'
 set interfaces ethernet eth1 description 'LAN'
+set interfaces ethernet eth2 description 'LAN'

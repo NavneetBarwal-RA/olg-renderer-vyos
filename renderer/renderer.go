@@ -26,7 +26,7 @@ type Option func(*Renderer) error
 // Renderer is the public render facade.
 type Renderer struct {
 	engine  *templates.Engine
-	portMap map[string]string
+	portMap map[string][]string
 }
 
 // New constructs an MVP renderer instance.
@@ -56,32 +56,38 @@ func New(opts ...Option) (*Renderer, error) {
 	return r, nil
 }
 
-// WithPortMap extends or overrides the default selector-to-interface mapping.
-func WithPortMap(portMap map[string]string) Option {
+// WithPortMap extends or overrides the default selector-to-interface-list mapping.
+func WithPortMap(portMap map[string][]string) Option {
 	return func(r *Renderer) error {
 		if portMap == nil {
 			return fmt.Errorf("port map must not be nil")
 		}
-		for selector, iface := range portMap {
+		validated := make(map[string][]string, len(portMap))
+		for selector, ifaces := range portMap {
 			if strings.TrimSpace(selector) == "" {
 				return fmt.Errorf("port map selector must not be empty")
 			}
 			if selector != strings.TrimSpace(selector) || strings.ContainsAny(selector, "\r\n\t") {
 				return fmt.Errorf("port map selector %q contains unsupported whitespace", selector)
 			}
-			if err := normalize.ValidateInterfaceToken(iface, fmt.Sprintf("port map selector %q interface", selector)); err != nil {
+			if len(ifaces) == 0 {
+				return fmt.Errorf("port map selector %q must include at least one interface", selector)
+			}
+			interfaces, err := normalizePortMapInterfaces(selector, ifaces)
+			if err != nil {
 				return err
 			}
+			validated[selector] = interfaces
 		}
 
 		next := clonePortMap(r.portMap)
-		keys := make([]string, 0, len(portMap))
-		for selector := range portMap {
+		keys := make([]string, 0, len(validated))
+		for selector := range validated {
 			keys = append(keys, selector)
 		}
 		sort.Strings(keys)
 		for _, selector := range keys {
-			next[selector] = portMap[selector]
+			next[selector] = append([]string(nil), validated[selector]...)
 		}
 		r.portMap = next
 		return nil
@@ -154,21 +160,41 @@ func (r *Renderer) Render(ctx context.Context, input Input) (Output, error) {
 	}, nil
 }
 
-func defaultPortMap() map[string]string {
-	return map[string]string{
-		"WAN*": "eth0",
-		"LAN*": "eth1",
-		"LAN1": "eth1",
-		"LAN2": "eth1",
+func defaultPortMap() map[string][]string {
+	return map[string][]string{
+		"WAN*": {"eth0"},
+		"LAN*": {"eth1", "eth2"},
+		"LAN1": {"eth1"},
+		"LAN2": {"eth2"},
 	}
 }
 
-func clonePortMap(portMap map[string]string) map[string]string {
-	clone := make(map[string]string, len(portMap))
-	for selector, iface := range portMap {
-		clone[selector] = iface
+func clonePortMap(portMap map[string][]string) map[string][]string {
+	clone := make(map[string][]string, len(portMap))
+	for selector, ifaces := range portMap {
+		clone[selector] = append([]string(nil), ifaces...)
 	}
 	return clone
+}
+
+func normalizePortMapInterfaces(selector string, ifaces []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(ifaces))
+	interfaces := make([]string, 0, len(ifaces))
+	for _, iface := range ifaces {
+		if strings.TrimSpace(iface) == "" {
+			return nil, fmt.Errorf("port map selector %q interface must not be empty", selector)
+		}
+		if err := normalize.ValidateInterfaceToken(iface, fmt.Sprintf("port map selector %q interface", selector)); err != nil {
+			return nil, err
+		}
+		if _, exists := seen[iface]; exists {
+			continue
+		}
+		seen[iface] = struct{}{}
+		interfaces = append(interfaces, iface)
+	}
+	sort.Strings(interfaces)
+	return interfaces, nil
 }
 
 func validateInput(ctx context.Context, input Input) error {

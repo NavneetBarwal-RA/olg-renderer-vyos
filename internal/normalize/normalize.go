@@ -58,19 +58,20 @@ type InterfacesSection struct {
 
 // Bridge describes one normalized VyOS bridge.
 type Bridge struct {
-	Name            string
-	Address         string
-	Description     string
-	MemberInterface string
-	EnableVLAN      bool
-	VIFs            []VIF
+	Name             string
+	Address          string
+	Description      string
+	MemberInterfaces []string
+	EnableVLAN       bool
+	VIFs             []VIF
 }
 
-// VIF describes one normalized bridge VIF. Allowed VLAN output is derived from unique sorted VIF IDs.
+// VIF describes one normalized bridge VIF. Allowed VLAN output is derived from unique sorted VIF IDs and member-interface membership.
 type VIF struct {
-	ID          int
-	Address     string
-	Description string
+	ID               int
+	Address          string
+	Description      string
+	MemberInterfaces []string
 }
 
 // Ethernet describes one normalized ethernet interface.
@@ -93,7 +94,7 @@ type NATRule struct {
 }
 
 // Normalize converts decoded payload fields into template-ready data.
-func Normalize(root map[string]json.RawMessage, portMap map[string]string) (RenderData, error) {
+func Normalize(root map[string]json.RawMessage, portMap map[string][]string) (RenderData, error) {
 	interfaces, err := normalizeInterfaces(root, portMap)
 	if err != nil {
 		return RenderData{}, err

@@ -296,17 +296,17 @@ Title: Custom port map override
 Summary:
 Verifies that clients can override the default MVP selector mapping through
 WithPortMap without changing payload shape. The test renders the basic
-interface fixture with WAN* and LAN* mapped to custom ethernet interfaces.
+interface fixture with WAN* and LAN* mapped to custom ethernet interface sets.
 
 Validates:
   - WithPortMap overrides default selector mappings
   - Rendered bridge member commands use the custom interfaces
-  - Renderer defensively copies caller-provided map values
+  - Renderer defensively copies caller-provided map and slice values
 */
 func TestRenderWithCustomPortMap(t *testing.T) {
-	portMap := map[string]string{
-		"WAN*": "eth10",
-		"LAN*": "eth9",
+	portMap := map[string][]string{
+		"WAN*": {"eth10"},
+		"LAN*": {"eth9", "eth8", "eth8"},
 	}
 
 	r, err := New(WithPortMap(portMap))
@@ -314,7 +314,8 @@ func TestRenderWithCustomPortMap(t *testing.T) {
 		t.Fatalf("new renderer with port map: %v", err)
 	}
 
-	portMap["WAN*"] = "eth99"
+	portMap["WAN*"][0] = "eth99"
+	portMap["LAN*"] = []string{"eth7"}
 
 	payload := mustReadFile(t, filepath.Join("..", "testdata", "valid", "interface-basic.json"))
 	out, err := r.Render(context.Background(), Input{
@@ -330,8 +331,10 @@ func TestRenderWithCustomPortMap(t *testing.T) {
 
 	expectedLines := []string{
 		"set interfaces bridge br0 member interface eth10",
+		"set interfaces bridge br1 member interface eth8",
 		"set interfaces bridge br1 member interface eth9",
 		"set interfaces ethernet eth10 description 'WAN'",
+		"set interfaces ethernet eth8 description 'LAN'",
 		"set interfaces ethernet eth9 description 'LAN'",
 	}
 	for _, line := range expectedLines {
@@ -341,6 +344,9 @@ func TestRenderWithCustomPortMap(t *testing.T) {
 	}
 	if strings.Contains(out.RenderedText, "eth99") {
 		t.Fatalf("renderer used mutated caller map value:\n%s", out.RenderedText)
+	}
+	if strings.Contains(out.RenderedText, "eth7") {
+		t.Fatalf("renderer used mutated caller map slice:\n%s", out.RenderedText)
 	}
 }
 
@@ -355,18 +361,21 @@ callers get a stable typed input error.
 
 Validates:
   - Nil port maps are rejected
-  - Empty selectors and empty interface names are rejected
+  - Empty selectors and nil or empty interface lists are rejected
+  - Empty interface names are rejected
   - Unsafe interface token values are rejected
 */
 func TestNewRejectsInvalidPortMap(t *testing.T) {
 	tests := []struct {
 		name    string
-		portMap map[string]string
+		portMap map[string][]string
 	}{
 		{name: "nil map", portMap: nil},
-		{name: "empty selector", portMap: map[string]string{"": "eth0"}},
-		{name: "empty interface", portMap: map[string]string{"WAN*": ""}},
-		{name: "unsafe interface", portMap: map[string]string{"WAN*": "eth0;delete"}},
+		{name: "empty selector", portMap: map[string][]string{"": {"eth0"}}},
+		{name: "nil interface list", portMap: map[string][]string{"WAN*": nil}},
+		{name: "empty interface list", portMap: map[string][]string{"WAN*": {}}},
+		{name: "empty interface", portMap: map[string][]string{"WAN*": {""}}},
+		{name: "unsafe interface", portMap: map[string][]string{"WAN*": {"eth0;delete"}}},
 	}
 
 	for _, tc := range tests {
@@ -632,8 +641,8 @@ Type: Positive
 Title: Allowed VLANs derived from VIF IDs
 Summary:
 Renders duplicate VLAN IDs to verify allowed-vlan output is derived from
-unique sorted VIF IDs. The VIF commands remain deterministic, while the bridge
-member receives only one allowed-vlan line for the duplicated VLAN ID.
+unique sorted VIF IDs per member interface. The VIF commands remain deterministic,
+while the bridge member receives only one allowed-vlan line for the duplicated VLAN ID.
 
 Validates:
   - VIFs are the single source of truth for VLAN IDs
@@ -650,7 +659,7 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 				"role": "downstream"
 			},
 			{
-				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
 				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
 				"name": "LAN.10A",
 				"role": "downstream",
@@ -674,10 +683,14 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 	if count := strings.Count(out.RenderedText, "set interfaces bridge br1 member interface eth1 allowed-vlan 10\n"); count != 1 {
 		t.Fatalf("expected one allowed-vlan 10 line, got %d\n%s", count, out.RenderedText)
 	}
+	if count := strings.Count(out.RenderedText, "set interfaces bridge br1 member interface eth2 allowed-vlan 10\n"); count != 0 {
+		t.Fatalf("expected no eth2 allowed-vlan 10 line, got %d\n%s", count, out.RenderedText)
+	}
 
 	expectedOrder := []string{
 		"set interfaces bridge br1 member interface eth1 allowed-vlan 10",
 		"set interfaces bridge br1 member interface eth1 native-vlan 1",
+		"set interfaces bridge br1 member interface eth2",
 		"set interfaces bridge br1 vif 10 address 192.168.10.1/24",
 		"set interfaces bridge br1 vif 10 description 'LAN.10A'",
 		"set interfaces bridge br1 vif 10 address 192.168.10.2/24",
@@ -693,6 +706,128 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 			t.Fatalf("expected %q after previous line\n%s", line, out.RenderedText)
 		}
 		last = idx
+	}
+}
+
+/*
+TC-NORMALIZE-008
+Type: Positive
+Title: Allowed VLANs are per member interface
+Summary:
+Renders VIFs on LAN1, LAN2, and LAN* to verify allowed-vlan lines follow
+VIF member-interface membership. A wildcard VLAN applies to both LAN members,
+while per-port VLANs apply only to their resolved physical interface.
+
+Validates:
+  - LAN1 VLANs apply only to eth1
+  - LAN2 VLANs apply only to eth2
+  - LAN* VLANs apply to eth1 and eth2
+*/
+func TestRenderAllowedVLANsPerMemberInterface(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN*"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"name": "LAN",
+				"role": "downstream"
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"name": "LAN.10",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.20.1/24"},
+				"name": "LAN.20",
+				"role": "downstream",
+				"vlan": {"id": 20}
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN*"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.30.1/24"},
+				"name": "LAN.30",
+				"role": "downstream",
+				"vlan": {"id": 30}
+			}
+		]
+	}`)
+
+	out, err := renderPayload(t, payload)
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	expectedLines := []string{
+		"set interfaces bridge br1 member interface eth1 allowed-vlan 10",
+		"set interfaces bridge br1 member interface eth1 allowed-vlan 30",
+		"set interfaces bridge br1 member interface eth1 native-vlan 1",
+		"set interfaces bridge br1 member interface eth2 allowed-vlan 20",
+		"set interfaces bridge br1 member interface eth2 allowed-vlan 30",
+		"set interfaces bridge br1 member interface eth2 native-vlan 1",
+	}
+	for _, line := range expectedLines {
+		if !strings.Contains(out.RenderedText, line) {
+			t.Fatalf("expected output to contain %q\n%s", line, out.RenderedText)
+		}
+	}
+
+	unexpectedLines := []string{
+		"set interfaces bridge br1 member interface eth1 allowed-vlan 20",
+		"set interfaces bridge br1 member interface eth2 allowed-vlan 10",
+	}
+	for _, line := range unexpectedLines {
+		if strings.Contains(out.RenderedText, line) {
+			t.Fatalf("expected output not to contain %q\n%s", line, out.RenderedText)
+		}
+	}
+}
+
+/*
+TC-NORMALIZE-009
+Type: Positive
+Title: Ethernet description prefers base interfaces
+Summary:
+Renders a VLAN interface before its parent downstream interface to verify
+ethernet descriptions prefer non-VLAN/base names. VLAN descriptions are used
+only when no base interface maps to that physical port.
+
+Validates:
+  - Base interface descriptions outrank VLAN descriptions
+  - Input order does not let VLAN names override base ethernet descriptions
+  - Ethernet output remains deterministic
+*/
+func TestRenderEthernetDescriptionPrefersBaseInterface(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"name": "LAN.10",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN1"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"name": "LAN",
+				"role": "downstream"
+			}
+		]
+	}`)
+
+	out, err := renderPayload(t, payload)
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+	if !strings.Contains(out.RenderedText, "set interfaces ethernet eth1 description 'LAN'\n") {
+		t.Fatalf("expected base interface description for eth1\n%s", out.RenderedText)
+	}
+	if strings.Contains(out.RenderedText, "set interfaces ethernet eth1 description 'LAN.10'\n") {
+		t.Fatalf("did not expect VLAN description to override eth1\n%s", out.RenderedText)
 	}
 }
 
