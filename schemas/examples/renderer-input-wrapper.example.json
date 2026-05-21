@@ -130,10 +130,10 @@
             }
           },
           {
-            "out_interface": {
+            "out-interface": {
               "name": "br0"
             },
-            "rule_id": 110,
+            "rule-id": 110,
             "source": {
               "address": "192.168.10.0/24"
             },

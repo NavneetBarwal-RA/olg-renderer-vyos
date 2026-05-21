@@ -102,77 +102,25 @@ func normalizeNATRule(rawRule json.RawMessage) (NATRule, error) {
 }
 
 func readRuleID(ruleObj map[string]json.RawMessage) (int, error) {
-	rawHyphen, hasHyphen := ruleObj["rule-id"]
-	rawSnake, hasSnake := ruleObj["rule_id"]
-
-	if !hasHyphen && !hasSnake {
-		return 0, fmt.Errorf("missing rule-id or rule_id")
+	rawRuleID, ok := ruleObj["rule-id"]
+	if !ok {
+		return 0, fmt.Errorf("missing rule-id")
 	}
-
-	if hasHyphen && hasSnake {
-		hyp, err := parseJSONInt(rawHyphen)
-		if err != nil {
-			return 0, fmt.Errorf("invalid rule-id")
-		}
-		snk, err := parseJSONInt(rawSnake)
-		if err != nil {
-			return 0, fmt.Errorf("invalid rule_id")
-		}
-		if hyp != snk {
-			return 0, fmt.Errorf("rule-id and rule_id conflict")
-		}
-		return hyp, nil
-	}
-
-	if hasHyphen {
-		id, err := parseJSONInt(rawHyphen)
-		if err != nil {
-			return 0, fmt.Errorf("invalid rule-id")
-		}
-		return id, nil
-	}
-
-	id, err := parseJSONInt(rawSnake)
+	id, err := parseJSONInt(rawRuleID)
 	if err != nil {
-		return 0, fmt.Errorf("invalid rule_id")
+		return 0, fmt.Errorf("invalid rule-id")
 	}
 	return id, nil
 }
 
 func readOutboundInterface(ruleObj map[string]json.RawMessage) (string, error) {
-	rawHyphen, hasHyphen := ruleObj["out-interface"]
-	rawSnake, hasSnake := ruleObj["out_interface"]
-
-	if !hasHyphen && !hasSnake {
-		return "", fmt.Errorf("missing out-interface or out_interface")
+	rawOutbound, ok := ruleObj["out-interface"]
+	if !ok {
+		return "", fmt.Errorf("missing out-interface")
 	}
-
-	if hasHyphen && hasSnake {
-		a, err := readObjectName(rawHyphen)
-		if err != nil {
-			return "", fmt.Errorf("invalid out-interface")
-		}
-		b, err := readObjectName(rawSnake)
-		if err != nil {
-			return "", fmt.Errorf("invalid out_interface")
-		}
-		if a != b {
-			return "", fmt.Errorf("out-interface and out_interface conflict")
-		}
-		return a, nil
-	}
-
-	if hasHyphen {
-		name, err := readObjectName(rawHyphen)
-		if err != nil {
-			return "", fmt.Errorf("invalid out-interface")
-		}
-		return name, nil
-	}
-
-	name, err := readObjectName(rawSnake)
+	name, err := readObjectName(rawOutbound)
 	if err != nil {
-		return "", fmt.Errorf("invalid out_interface")
+		return "", fmt.Errorf("invalid out-interface")
 	}
 	return name, nil
 }

@@ -500,17 +500,16 @@ NAT is optional. If absent, renderer must not generate NAT commands.
 Each rule must include:
 
 ```text
-rule-id or rule_id
-out-interface.name or out_interface.name
+rule-id
+out-interface.name
 source.address
 translation.address
 ```
 
-Accepted aliases:
+Alias policy:
 
 ```text
-rule-id        or rule_id
-out-interface  or out_interface
+The renderer uses schema-defined field names only. MVP does not define or document renderer-level aliases.
 ```
 
 ### NAT normalization rules
@@ -574,8 +573,8 @@ Input:
           }
         },
         {
-          "rule_id": 110,
-          "out_interface": {
+          "rule-id": 110,
+          "out-interface": {
             "name": "br0"
           },
           "source": {
@@ -637,7 +636,7 @@ Normalization owns:
 ```text
 - payload parsing
 - optional metadata checks
-- field alias handling for NAT
+- schema-defined field handling for NAT
 - interface role filtering
 - bridge naming
 - VLAN/VIF grouping
@@ -848,7 +847,7 @@ Required:
 - schema compatibility checks
 - optional payload metadata mismatch
 - interface normalization
-- NAT alias handling
+- NAT canonical field handling
 - error categories
 ```
 

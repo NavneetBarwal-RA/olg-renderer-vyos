@@ -425,8 +425,8 @@ Input:
           }
         },
         {
-          "rule_id": 110,
-          "out_interface": {
+          "rule-id": 110,
+          "out-interface": {
             "name": "br0"
           },
           "source": {
@@ -442,11 +442,10 @@ Input:
 }
 ```
 
-Accepted NAT aliases:
+NAT field policy:
 
 ```text
-rule-id        or rule_id
-out-interface  or out_interface
+The renderer uses schema-defined field names only. MVP does not define or document renderer-level aliases.
 ```
 
 MVP NAT translation support:

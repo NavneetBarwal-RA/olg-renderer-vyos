@@ -403,8 +403,8 @@ func TestRenderRejectsDuplicateNATRuleIDs(t *testing.T) {
 						"translation": {"address": "masquerade"}
 					},
 					{
-						"rule_id": 100,
-						"out_interface": {"name": "br0"},
+						"rule-id": 100,
+						"out-interface": {"name": "br0"},
 						"source": {"address": "192.168.10.0/24"},
 						"translation": {"address": "masquerade"}
 					}
@@ -539,29 +539,28 @@ func TestRenderRejectsUnsafeNATValues(t *testing.T) {
 /*
 TC-NORMALIZE-005
 Type: Negative
-Title: NAT alias conflicts
+Title: NAT canonical field names only
 Summary:
-Ensures accepted NAT aliases cannot provide contradictory values in the same
-rule. The renderer accepts hyphen and snake_case aliases, but conflicting
-values must be rejected to keep normalization deterministic.
+Ensures NAT normalization consumes schema-defined canonical field names only.
+Snake_case variants are not renderer-level aliases and do not satisfy required
+canonical rule fields.
 
 Validates:
-  - Conflicting rule-id aliases are rejected
-  - Conflicting out-interface aliases are rejected
+  - rule_id does not satisfy rule-id
+  - out_interface does not satisfy out-interface
   - Failures return normalize_failed
 */
-func TestRenderRejectsNATAliasConflicts(t *testing.T) {
+func TestRenderRequiresCanonicalNATFieldNames(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload []byte
 	}{
 		{
-			name: "rule ID conflict",
+			name: "missing canonical rule ID",
 			payload: []byte(`{
 				"nat": {
 					"snat": {
 						"rules": [{
-							"rule-id": 100,
 							"rule_id": 110,
 							"out-interface": {"name": "br0"},
 							"source": {"address": "192.168.60.0/24"},
@@ -572,13 +571,12 @@ func TestRenderRejectsNATAliasConflicts(t *testing.T) {
 			}`),
 		},
 		{
-			name: "out interface conflict",
+			name: "missing canonical out interface",
 			payload: []byte(`{
 				"nat": {
 					"snat": {
 						"rules": [{
 							"rule-id": 100,
-							"out-interface": {"name": "br0"},
 							"out_interface": {"name": "br1"},
 							"source": {"address": "192.168.60.0/24"},
 							"translation": {"address": "masquerade"}
