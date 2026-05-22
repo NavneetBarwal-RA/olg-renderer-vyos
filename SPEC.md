@@ -1436,7 +1436,7 @@ rule 110 is removed because `nat source` is reset, and rule 100 is recreated fro
 Goal:
 
 ```text
-Remove stale cloud-owned bridge VIF config by resetting `interfaces bridge`.
+Remove stale cloud-owned bridge/VIF config by resetting the cloud-owned `interfaces bridge` root.
 ```
 
 Old desired contains:
@@ -1450,15 +1450,16 @@ New desired omits that VLAN.
 Cloud-authoritative reset behavior:
 
 ```text
-delete interfaces bridge br1
-set interfaces bridge br1 ...
+delete interfaces bridge
+set current rendered bridge commands
 commit
 ```
 
 Result:
 
 ```text
-stale br1 vif 10 config is removed.
+stale bridge/VIF config is removed because `interfaces bridge` is reset.
+current desired bridge config is recreated from renderer output.
 ```
 
 ### UC-05: Reboot with KV as source of truth
