@@ -2,18 +2,28 @@
 
 ## 1. Overview
 
-`olg-renderer-vyos` converts validated OLG/uCentral JSON configuration into deterministic VyOS CLI `set` commands.
+`olg-renderer-vyos` is the VyOS render/apply library used by `olg-server-vyos-client-natagent`.
 
-The renderer is a public Go library imported by `olg-server-vyos-client-natagent`.
-
-The renderer does not apply commands. It only produces command text.
+The repository has two intended public responsibilities:
 
 ```text
-OLG/uCentral JSON
-  -> renderer metadata validation
-  -> normalization
-  -> templates
-  -> VyOS set-command text
+renderer:
+  OLG/uCentral JSON -> deterministic VyOS CLI set commands
+
+apply:
+  deterministic VyOS CLI set commands -> managed reset -> commit runtime config
+```
+
+The repository must remain independent of NATS. NATS command handling, JetStream KV access, and result/status publishing belong to `nats-agent-core` and `olg-server-vyos-client-natagent`.
+
+End-to-end system flow:
+
+```text
+cmd.configure.vyos
+  -> vyos-nats-agent loads latest desired config from KV
+  -> renderer.Render(...)
+  -> apply.Engine.Apply(...)
+  -> vyos-nats-agent publishes result/status
 ```
 
 ---
@@ -26,42 +36,118 @@ The renderer must be:
 - deterministic
 - side-effect free
 - schema-version aware
-- small enough to reason about
 - explicit in translation behavior
 - easy to test with golden fixtures
 - safe to call from olg-server-vyos-client-natagent
 ```
 
-For the same input payload, renderer version, schema version, and target rules, output must be identical.
+The apply engine must be:
+
+```text
+- explicit and allowlist-based
+- safe against full device config deletion
+- independent of NATS
+- testable without real VyOS
+- commit-only by default
+- able to remove stale cloud-owned config without old-vs-new diff logic
+- simple enough to implement as one coherent MVP change
+```
+
+For the same input payload, renderer version, schema version, target rules, and port mapping, renderer output must be identical.
+
+For the same rendered command text and apply policy, apply planning must be deterministic.
 
 ---
 
 ## 3. Permanent Boundaries
 
-`olg-renderer-vyos` must not implement:
+This repository must not implement:
 
 ```text
 - NATS connection
 - JetStream KV read/write
 - configure/action handler registration
 - result/status publishing
-- local applied UUID state
-- VyOS delete/reconcile planning
-- VyOS apply/commit/save/discard
-- shell command execution
-- live device inspection
+- cloud command envelopes
+- cloud-facing command APIs
 - runtime schema fetching
+- live device inventory discovery
 ```
 
-These responsibilities belong to `nats-agent-core`, `olg-server-vyos-client-natagent`, and the agent's internal apply/VyOS packages.
+The renderer package must not implement:
+
+```text
+- delete planning
+- apply
+- commit
+- save
+- discard
+- shell execution
+- NATS integration
+```
+
+The apply package must not implement:
+
+```text
+- OLG/uCentral JSON rendering
+- schema-driven source translation
+- NATS integration
+- KV access
+- result/status publishing
+```
+
+The VyOS NATS client owns orchestration:
+
+```text
+LoadDesiredConfig
+  -> adapt to renderer.Input
+  -> renderer.Render
+  -> adapt to apply.Input
+  -> apply.Engine.Apply
+  -> publish result/status
+```
 
 ---
 
-## 4. Public Renderer Facade
+## 4. Package Responsibilities
+
+Recommended package split:
+
+```text
+renderer/
+  public renderer API
+  metadata validation
+  OLG/uCentral payload normalization
+  template execution
+  render errors
+
+apply/
+  public apply engine API
+  rendered command validation
+  managed reset planning
+  temporary runtime state
+  executor interface
+  apply errors
+
+internal/normalize/
+  renderer normalization internals
+
+internal/templates/
+  renderer templates
+
+internal/vyos/
+  real VyOS executor implementation
+```
+
+The public packages should expose stable APIs. Internal packages can evolve as needed.
+
+---
+
+## 5. Public Renderer Facade
 
 The renderer exposes a public Go facade used by `olg-server-vyos-client-natagent`.
 
-The renderer package must not import `nats-agent-core` and must not accept `agentcore.StoredDesiredConfig` directly. The agent owns the adapter from its desired-config record to renderer input.
+The renderer package must not import `nats-agent-core` and must not accept `agentcore.StoredDesiredConfig` directly.
 
 Expected public API direction:
 
@@ -69,13 +155,9 @@ Expected public API direction:
 package renderer
 
 func New(opts ...Option) (*Renderer, error)
-
 func WithPortMap(map[string][]string) Option
-
 func (r *Renderer) Render(ctx context.Context, input Input) (Output, error)
-
 func GetInfo() Info
-
 func (r *Renderer) Info() Info
 ```
 
@@ -120,18 +202,17 @@ Go API note:
 ```text
 - The renderer exposes GetInfo() and (*Renderer).Info().
 - Go does not allow both type Info and func Info() in the same package namespace.
-- Documentation and callers should use GetInfo() for the package-level metadata accessor.
 ```
 
 Facade rules:
 
 ```text
-- PayloadJSON must be the actual OLG/uCentral desired config object, not the full NATS KV record.
+- PayloadJSON must be the actual OLG/uCentral desired config object.
+- PayloadJSON must not be the full NATS KV record.
 - PayloadJSON must not be a wrapper object containing the desired config under $.config.
 - The renderer must not automatically unwrap $.config.
 - RenderedText must be VyOS CLI set-command text only.
 - RenderedText must not include configure/commit/save/delete/show commands.
-- The agent adapter maps agentcore.StoredDesiredConfig into renderer.Input.
 ```
 
 Agent adapter mapping:
@@ -146,7 +227,7 @@ configured schema ver. -> renderer.Input.SchemaVersion
 
 ---
 
-## 5. Renderer Input Contract
+## 6. Renderer Input Contract
 
 The renderer input contains metadata plus the desired JSON payload.
 
@@ -165,12 +246,10 @@ Expected MVP metadata values:
 ```text
 target = vyos
 schema_name = olg-ucentral
-schema_version = first explicitly supported OLG/uCentral schema version
+schema_version = 4.2.0
 ```
 
-### Canonical `payload_json`
-
-For the MVP, `payload_json` is the raw OLG/uCentral config object.
+Canonical `payload_json` is the raw OLG/uCentral config object.
 
 Example shape:
 
@@ -185,24 +264,9 @@ Example shape:
 
 The renderer does not expect the NATS KV record shape and does not unwrap `$.config`.
 
-Non-canonical upstream wrapper shape:
-
-```json
-{
-  "config": {
-    "interfaces": [],
-    "nat": {}
-  }
-}
-```
-
 If the desired config is wrapped by another component, the agent adapter must pass only the actual OLG/uCentral config object to the renderer.
 
-### Optional payload metadata
-
-If payload metadata exists, it must not contradict renderer input metadata.
-
-Accepted optional payload fields:
+Optional payload metadata:
 
 ```text
 target
@@ -224,7 +288,7 @@ Rules:
 
 ---
 
-## 6. Renderer Output Contract
+## 7. Renderer Output Contract
 
 The renderer output must include:
 
@@ -260,13 +324,13 @@ delete
 show
 ```
 
-The renderer describes desired configuration only. Delete/reconcile behavior is handled by the agent apply layer.
+The renderer describes desired configuration only. Delete, apply, commit, save, discard, and device execution are handled by the apply package.
 
 ---
 
-## 7. Rendering Scope for MVP
+## 8. Rendering Scope for MVP
 
-MVP supported sections:
+MVP supported renderer sections:
 
 ```text
 interfaces
@@ -287,7 +351,7 @@ PKI
 
 ---
 
-## 8. Interface Input Contract
+## 9. Interface Input Contract
 
 The renderer reads interface data from:
 
@@ -306,8 +370,6 @@ downstream
 
 Unsupported roles are ignored for MVP rendering.
 
-### Interface fields
-
 Supported fields:
 
 ```text
@@ -320,22 +382,7 @@ interfaces[].ipv4.subnet
 interfaces[].vlan.id
 ```
 
-### Interface alias policy
-
 No interface field aliases are accepted in the MVP.
-
-Accepted interface field names are exactly:
-
-```text
-interfaces[].ethernet
-interfaces[].ethernet[].select-ports
-interfaces[].ethernet[].vlan-tag
-interfaces[].ipv4.addressing
-interfaces[].ipv4.subnet
-interfaces[].role
-interfaces[].name
-interfaces[].vlan.id
-```
 
 The renderer should not document or silently depend on snake_case aliases such as:
 
@@ -344,39 +391,27 @@ select_ports
 vlan_tag
 ```
 
-Required missing fields should return a typed normalization error. Optional unsupported fields may be ignored.
-
-### Required fields by case
-
-For any renderable interface:
+Required fields by case:
 
 ```text
-role
-ethernet[].select-ports[]
-```
+For any renderable interface:
+  role
+  ethernet[].select-ports[]
 
 For dynamic IPv4:
-
-```text
-ipv4.addressing = dynamic
-```
+  ipv4.addressing = dynamic
 
 For static IPv4:
-
-```text
-ipv4.addressing = static
-ipv4.subnet
-```
+  ipv4.addressing = static
+  ipv4.subnet
 
 For VLAN/VIF rendering:
-
-```text
-role = downstream
-vlan.id
-ipv4.subnet
+  role = downstream
+  vlan.id
+  ipv4.subnet
 ```
 
-### Interface normalization rules
+Interface normalization rules:
 
 ```text
 - upstream non-VLAN interface maps to bridge br0
@@ -399,11 +434,13 @@ LAN1 -> eth1
 LAN2 -> eth2
 ```
 
-`LAN*` is a group/wildcard selector in the default MVP fixture mapping. If production mapping differs, the agent or device-profile layer must resolve it before calling the renderer and pass it with `renderer.WithPortMap`. The renderer must not discover live device interfaces, read mapping files, or add runtime filesystem dependencies.
+Production mapping should be resolved by the agent or device-profile layer and passed with `renderer.WithPortMap`.
+
+The renderer must not discover live device interfaces, read mapping files, or add runtime filesystem dependencies.
 
 ---
 
-## 9. Canonical Interface Example
+## 10. Canonical Interface Example
 
 Input:
 
@@ -488,7 +525,7 @@ Ordering requirements:
 
 ---
 
-## 10. NAT Input Contract
+## 11. NAT Input Contract
 
 The renderer reads explicit source NAT data from:
 
@@ -499,8 +536,6 @@ payload_json.nat.snat.rules
 `rules` must be an array when present.
 
 NAT is optional. If absent, renderer must not generate NAT commands.
-
-### Required NAT fields
 
 Each rule must include:
 
@@ -517,7 +552,7 @@ Alias policy:
 The renderer uses schema-defined field names only. MVP does not define or document renderer-level aliases.
 ```
 
-### NAT normalization rules
+NAT normalization rules:
 
 ```text
 - rules are explicit only
@@ -526,37 +561,11 @@ The renderer uses schema-defined field names only. MVP does not define or docume
 - cloud-provided source and translation values are preserved exactly
 ```
 
-### NAT translation address
-
-MVP source NAT intentionally supports:
-
-```text
-nat.snat.rules[].translation.address
-```
-
-`translation.address` is a string from the OLG/uCentral schema. It may be a concrete translated source address or a schema-supported keyword such as:
-
-```text
-masquerade
-```
-
-Example:
-
-```json
-"translation": {
-  "address": "masquerade"
-}
-```
-
-Expected output:
-
-```text
-set nat source rule 100 translation address masquerade
-```
+`translation.address` is a string from the OLG/uCentral schema. It may be a concrete translated source address or a schema-supported keyword such as `masquerade`.
 
 ---
 
-## 11. Canonical NAT Example
+## 12. Canonical NAT Example
 
 Input:
 
@@ -608,7 +617,7 @@ set nat source rule 110 translation address masquerade
 
 ---
 
-## 12. Rendering Pipeline
+## 13. Rendering Pipeline
 
 The renderer must follow this pipeline:
 
@@ -632,7 +641,7 @@ nat
 
 ---
 
-## 13. Normalization Layer
+## 14. Normalization and Template Layers
 
 Normalization converts raw JSON into template-friendly render data.
 
@@ -645,13 +654,14 @@ Normalization owns:
 - interface role filtering
 - bridge naming
 - VLAN/VIF grouping
-- consuming renderer-configured physical port mapping
+- renderer-configured physical port mapping
 - NAT rule normalization
 - deterministic sorting
 ```
 
-Templates should not contain business mapping decisions.
-Templates derive bridge `allowed-vlan` command lines from VIF IDs and VIF member-interface membership.
+Templates format normalized data into set-command text.
+
+Templates must not contain business mapping decisions and must not depend on Go map iteration order.
 
 Port mapping ownership:
 
@@ -666,59 +676,11 @@ Port mapping ownership:
 
 ---
 
-## 14. Template Layer
-
-Templates format normalized data into set-command text.
-
-Templates are implementation assets and should be added when renderer implementation begins.
-
-Initial structure:
-
-```text
-internal/templates/
-  templates.go
-  interface.tmpl
-  nat.tmpl
-
-  interface/
-    bridge.tmpl
-    ethernet.tmpl
-    vlan.tmpl
-```
-
-Responsibilities:
-
-```text
-templates.go
-  embeds templates, executes top-level sections, joins output
-
-interface.tmpl
-  renders interface-related command groups
-
-interface/bridge.tmpl
-  renders bridge commands
-
-interface/ethernet.tmpl
-  renders ethernet commands
-
-interface/vlan.tmpl
-  renders VIF commands
-
-nat.tmpl
-  renders source NAT commands
-```
-
-Templates must not depend on Go map iteration order.
-
----
-
 ## 15. Schema Usage
 
-Schemas are used as contracts and guardrails.
+Schemas are contracts and guardrails.
 
-### OLG/uCentral schema
-
-Used for:
+OLG/uCentral schema is used for:
 
 ```text
 - defining supported input schema version
@@ -726,11 +688,7 @@ Used for:
 - avoiding drift with olg-ucentral-client
 ```
 
-The renderer should not fetch this schema at runtime.
-
-### VyOS config schema
-
-Used for:
+VyOS config schema is used for:
 
 ```text
 - validating generated command paths in tests or CI
@@ -738,21 +696,15 @@ Used for:
 - future compatibility checks
 ```
 
-For MVP, the VyOS schema may be stored as a checked-in snapshot or documented external build artifact. Later, the VyOS build system can generate or provide the exact schema snapshot used by the target image.
+The renderer should not fetch schemas at runtime.
 
-### Manual translation
-
-The schemas do not replace translation logic.
-
-Manual renderer logic defines mappings such as:
+Manual renderer logic still defines semantic mappings such as:
 
 ```text
 upstream -> br0
 downstream -> br1
 VLAN downstream -> bridge VIF
 ```
-
-Physical selector mapping is renderer configuration, not live device discovery. The MVP default mapping is used for fixtures, and production mapping should be supplied through `WithPortMap`.
 
 ---
 
@@ -784,7 +736,7 @@ Future compatibility can be implemented using:
 
 ---
 
-## 17. Error Model
+## 17. Renderer Error Model
 
 The renderer must return typed errors with stable categories.
 
@@ -814,11 +766,594 @@ Rules:
 - missing required config object for a supported section returns missing_config or normalize_failed
 ```
 
-The agent may map all renderer errors to a single wire error code such as `render_failed`, while preserving the typed renderer error internally for logging/debugging.
+The agent may map renderer errors to a wire error code such as `render_failed`, while preserving the typed renderer error internally for logs.
 
 ---
 
-## 18. Deterministic Output Requirements
+## 18. Public Apply Engine Facade
+
+The apply engine exposes a public Go facade used by `olg-server-vyos-client-natagent`.
+
+The apply package must not import `nats-agent-core` and must not publish result/status messages.
+
+Expected public API direction:
+
+```go
+package apply
+
+func New(opts ...Option) (*Engine, error)
+func (e *Engine) Plan(ctx context.Context, input Input) (Plan, error)
+func (e *Engine) Apply(ctx context.Context, input Input) (Result, error)
+func GetInfo() Info
+```
+
+Expected public input shape:
+
+```go
+type Input struct {
+    Target          string
+    ConfigUUID      string
+    DesiredCommands string
+    DryRun          bool
+}
+```
+
+Expected public result shape:
+
+```go
+type Result struct {
+    Target         string
+    ConfigUUID     string
+    Applied        bool
+    Changed        bool
+    DryRun         bool
+    Saved          bool
+    DeleteCommands []string
+    SetCommands    []string
+    CommitOutput   string
+    SaveOutput     string
+    DiscardOutput  string
+}
+```
+
+Expected options:
+
+```go
+func WithExecutor(exec Executor) Option
+func WithStatePath(path string) Option
+func WithSaveAfterCommit(enabled bool) Option
+func WithManagedPolicy(policy ManagedPolicy) Option
+```
+
+API rules:
+
+```text
+- Plan is pure planning and must not execute commands or update state.
+- Apply validates, plans, executes, commits, and updates temporary state after success.
+- DryRun on Apply must behave like Plan plus Result shaping, without execution or state update.
+- Avoid duplicate public apply APIs with overlapping meaning.
+```
+
+---
+
+## 19. Apply Engine MVP Strategy
+
+The MVP apply strategy is managed reset.
+
+```text
+managed reset:
+  delete known cloud-owned VyOS sections
+  apply all rendered set commands
+  commit once
+```
+
+The MVP must not implement old-vs-new diff logic.
+
+The MVP must not delete full VyOS config.
+
+Rationale:
+
+```text
+- cloud sends full desired config
+- set-only apply leaves stale deleted cloud config behind
+- full device delete is unsafe
+- managed reset removes stale cloud-owned sections while preserving unknown/protected config
+```
+
+Execution must use one candidate configuration transaction:
+
+```text
+configure
+  delete managed sections
+  set rendered desired commands
+  commit
+```
+
+Do not commit after delete and before set.
+
+---
+
+## 20. Apply Managed Policy
+
+Deletion must be allowlist-based.
+
+Default MVP managed roots:
+
+```text
+interfaces bridge <cloud bridge>
+nat source rule <cloud-managed rule>
+```
+
+Default cloud bridge set:
+
+```text
+br0
+br1
+br2
+br3
+br4
+br5
+br6
+br7
+br8
+br9
+```
+
+Default NAT source rule handling may start with either:
+
+```text
+- configured managed rule IDs, or
+- managed rule ID range reserved for cloud-owned source NAT
+```
+
+The chosen policy must be explicit in code and tests.
+
+Never delete by default:
+
+```text
+system
+service ssh
+protocols
+interfaces ethernet
+container
+users
+agent bootstrap config
+local recovery config
+unknown future config
+```
+
+Future renderer sections must extend managed roots deliberately. For example, if DHCP rendering is added later, DHCP delete roots must be added explicitly at that time.
+
+---
+
+## 21. Apply Command Validation
+
+Apply input must be renderer-generated set-command text.
+
+Allowed command form:
+
+```text
+set ...
+```
+
+Reject these command roots or operations:
+
+```text
+configure
+commit
+save
+discard
+exit
+delete
+show
+run
+sudo
+```
+
+Reject shell execution hazards in rendered commands:
+
+```text
+;
+|
+&
+`
+$
+>
+<
+```
+
+The apply engine should not expose a generic arbitrary command execution API.
+
+Validation errors must happen before executor invocation.
+
+---
+
+## 22. Apply State
+
+Default apply state is temporary runtime state.
+
+Recommended default path:
+
+```text
+/run/olg-vyos-apply/state.json
+```
+
+State fields:
+
+```json
+{
+  "target": "vyos",
+  "config_uuid": "cfg-123",
+  "rendered_hash": "sha256:...",
+  "applied_at": "2026-05-22T00:00:00Z",
+  "mode": "managed_reset"
+}
+```
+
+Rules:
+
+```text
+- if state is missing, treat config as not applied
+- if ConfigUUID and rendered hash match, apply may return Changed=false
+- state is updated only after successful commit
+- state is not updated after validation, execution, commit, or save failure
+- state disappearance after reboot is expected
+```
+
+This supports KV as the source of truth:
+
+```text
+reboot
+  -> default saved VyOS config starts
+  -> agent reconnects to NATS
+  -> latest desired config is loaded from KV
+  -> render/apply runs again
+```
+
+---
+
+## 23. Commit and Save Policy
+
+Default behavior:
+
+```text
+commit = enabled
+save = disabled
+```
+
+The MVP must not save by default.
+
+Reason:
+
+```text
+- KV remains the source of truth
+- saved VyOS config remains bootstrap/recovery config
+- after reboot, agent rehydrates runtime config from KV
+```
+
+Critical deployment requirement:
+
+```text
+Bootstrap saved config must provide enough connectivity for the agent to reach NATS/KV after reboot.
+```
+
+Optional future behavior:
+
+```text
+WithSaveAfterCommit(true)
+  commit and then save after successful commit
+```
+
+If save is enabled and save fails, behavior must be explicit and tested. The default MVP can avoid save-failure complexity by keeping save disabled.
+
+---
+
+## 24. Apply Executor Boundary
+
+The apply package must execute through an interface.
+
+Expected executor direction:
+
+```go
+type Executor interface {
+    Execute(ctx context.Context, plan Plan) (ExecutionResult, error)
+}
+```
+
+Executor responsibilities:
+
+```text
+- open/enter VyOS configure context
+- apply delete commands
+- apply set commands
+- commit
+- optionally save if configured
+- discard candidate config on failure where possible
+```
+
+Testing executor:
+
+```text
+fake executor records plan and simulates success/failure
+```
+
+Real executor:
+
+```text
+internal/vyos executor performs local non-interactive VyOS operations
+```
+
+Unit tests must not require real VyOS.
+
+---
+
+## 25. Apply Flow
+
+Apply must follow this flow:
+
+```text
+1. Validate input metadata.
+2. Parse DesiredCommands into command lines.
+3. Reject unsafe or non-set commands.
+4. Compute normalized rendered command hash.
+5. Load temporary runtime state.
+6. If same ConfigUUID and hash already applied, return Changed=false.
+7. Build managed reset plan.
+8. If DryRun, return planned operations without execution or state update.
+9. Execute delete commands and set commands in one candidate session.
+10. Commit.
+11. Save only if explicitly enabled.
+12. Write temporary state only after successful commit/save policy completion.
+13. Return Result.
+```
+
+Failure flow:
+
+```text
+- discard candidate config where possible
+- do not update temporary state
+- return typed apply error
+```
+
+---
+
+## 26. Apply Error Model
+
+The apply engine must return typed errors with stable categories.
+
+Required categories:
+
+```text
+invalid_input
+invalid_command
+plan_failed
+state_load_failed
+state_save_failed
+executor_failed
+delete_failed
+set_failed
+commit_failed
+save_failed
+discard_failed
+apply_failed
+```
+
+The agent may map apply errors to a wire error code such as `apply_failed`, while preserving the typed apply error internally for logs.
+
+---
+
+## 27. VyOS NATS Client Integration Contract
+
+`olg-server-vyos-client-natagent` must orchestrate render and apply.
+
+Configure handler flow:
+
+```text
+1. Receive configure notification.
+2. Serialize configure processing with a mutex or equivalent.
+3. Publish received/loading status.
+4. Load latest desired config from KV.
+5. Validate target and UUID against notification.
+6. Check local runtime apply state if the agent owns the state check.
+7. Build renderer.Input.
+8. Call renderer.Render.
+9. Build apply.Input from renderer.Output.RenderedText.
+10. Call apply.Engine.Apply.
+11. Publish success/failure result.
+```
+
+The apply package must not publish NATS messages.
+
+Applied UUID/status must be updated only after render and apply both succeed.
+
+---
+
+## 28. Configure Use Cases
+
+### UC-01: First-time configure apply
+
+Goal:
+
+```text
+Apply a new desired VyOS config from KV.
+```
+
+Flow:
+
+```text
+1. Controller submits configure for target vyos.
+2. nats-agent-core stores desired config in KV and publishes cmd.configure.vyos.
+3. vyos-nats-agent receives the notification.
+4. Agent loads latest desired config from KV.
+5. Agent builds renderer.Input.
+6. Renderer returns set commands.
+7. Apply engine performs managed reset and applies set commands.
+8. Apply engine commits and does not save by default.
+9. Temporary state is updated after success.
+10. Agent publishes success result.
+```
+
+### UC-02: Same config received again during same boot
+
+Goal:
+
+```text
+Avoid unnecessary render/apply when the same UUID and rendered hash are already applied.
+```
+
+Flow:
+
+```text
+1. Agent receives configure notification for same UUID.
+2. Agent/apply state indicates same UUID and hash already applied.
+3. Apply returns Changed=false or agent short-circuits before apply.
+4. Agent publishes already_in_sync status and success result.
+```
+
+### UC-03: NAT rule removed from desired config
+
+Goal:
+
+```text
+Remove stale cloud-owned NAT rules without old-vs-new diff logic.
+```
+
+Old desired:
+
+```text
+set nat source rule 100 ...
+set nat source rule 110 ...
+```
+
+New desired:
+
+```text
+set nat source rule 100 ...
+```
+
+Managed reset behavior:
+
+```text
+delete nat source rule 100
+delete nat source rule 110
+set nat source rule 100 ...
+commit
+```
+
+Result:
+
+```text
+rule 110 is removed and rule 100 is recreated from current desired config.
+```
+
+### UC-04: VLAN removed from desired config
+
+Goal:
+
+```text
+Remove stale cloud-owned bridge VIF config.
+```
+
+Old desired contains:
+
+```text
+set interfaces bridge br1 vif 10 ...
+```
+
+New desired omits that VLAN.
+
+Managed reset behavior:
+
+```text
+delete interfaces bridge br1
+set interfaces bridge br1 ...
+commit
+```
+
+Result:
+
+```text
+stale br1 vif 10 config is removed.
+```
+
+### UC-05: Reboot with KV as source of truth
+
+Goal:
+
+```text
+After reboot, restore desired runtime config from KV without saving cloud config into VyOS saved config.
+```
+
+Flow:
+
+```text
+1. VyOS boots with saved bootstrap/recovery config.
+2. Temporary apply state is absent.
+3. Agent connects to NATS using bootstrap connectivity.
+4. Agent loads latest desired config from KV.
+5. Renderer renders latest desired payload.
+6. Apply engine applies and commits runtime config.
+7. Temporary state is written after success.
+```
+
+### UC-06: Render failure
+
+Goal:
+
+```text
+Do not apply if desired config cannot be rendered.
+```
+
+Flow:
+
+```text
+1. Agent loads desired config.
+2. Renderer returns a typed render error.
+3. Agent does not call apply.
+4. Temporary state is not updated.
+5. Agent publishes failure result with render_failed category.
+```
+
+### UC-07: Apply or commit failure
+
+Goal:
+
+```text
+Do not mark config applied if VyOS apply fails.
+```
+
+Flow:
+
+```text
+1. Renderer succeeds.
+2. Apply engine starts managed reset apply.
+3. Delete, set, or commit fails.
+4. Apply engine discards candidate config where possible.
+5. Temporary state is not updated.
+6. Agent publishes failure result with apply_failed category.
+```
+
+### UC-08: Missed configure notification
+
+Goal:
+
+```text
+Recover through KV source of truth even if transient notification is missed.
+```
+
+Flow:
+
+```text
+1. Desired config is stored in KV.
+2. Configure notification is missed or agent is offline.
+3. Agent starts or reconnects.
+4. Startup reconcile loads latest desired config from KV.
+5. Agent renders and applies if runtime state does not match.
+```
+
+---
+
+## 29. Deterministic Output Requirements
 
 The renderer must avoid:
 
@@ -840,11 +1375,19 @@ Sorting requirements:
 - NAT rules sorted by numeric rule ID
 ```
 
+Apply planning must avoid:
+
+```text
+- random map iteration
+- live-device-dependent delete plan generation
+- hidden default deletes outside managed policy
+```
+
 ---
 
-## 19. Testing Requirements
+## 30. Testing Requirements
 
-### Unit tests
+### Renderer unit tests
 
 Required:
 
@@ -854,10 +1397,10 @@ Required:
 - optional payload metadata mismatch
 - interface normalization
 - NAT canonical field handling
-- error categories
+- renderer error categories
 ```
 
-### Golden tests
+### Renderer golden tests
 
 Required:
 
@@ -887,26 +1430,32 @@ nat-absent.set
 full-mvp.set
 ```
 
-### Determinism test
+### Apply unit tests
 
-Render the same fixture repeatedly and assert identical output.
-
-### Schema compatibility tests
-
-For MVP, use checked-in fixtures aligned with the supported OLG/uCentral schema version.
-
-Later CI may:
+Required:
 
 ```text
-- fetch OLG/uCentral schema from pinned tag/commit
-- validate fixtures against schema
-- compute schema hash
-- validate set-command paths against VyOS schema snapshot
+- Plan rejects unsafe commands
+- Plan creates managed reset delete commands
+- Apply first config with no temporary state
+- Apply same UUID/hash returns Changed=false
+- NAT removal is handled by managed reset
+- VLAN removal is handled by managed reset
+- unknown/protected paths are not deleted
+- DryRun does not execute and does not update state
+- commit failure does not update state
+- save disabled by default
 ```
+
+### Integration tests
+
+Real VyOS tests can come later. MVP unit tests must use a fake executor.
 
 ---
 
-## 20. Repository Layout
+## 31. Repository Layout
+
+Desired layout after adding apply:
 
 ```text
 olg-renderer-vyos/
@@ -918,6 +1467,16 @@ olg-renderer-vyos/
     renderer.go
     types.go
     errors.go
+
+  apply/
+    engine.go
+    types.go
+    options.go
+    errors.go
+    parser.go
+    policy.go
+    planner.go
+    state.go
 
   internal/
     normalize/
@@ -934,6 +1493,9 @@ olg-renderer-vyos/
         bridge.tmpl
         ethernet.tmpl
         vlan.tmpl
+
+    vyos/
+      executor.go
 
   testdata/
     valid/
@@ -968,45 +1530,74 @@ Add future files only when implementation requires them.
 
 ---
 
-## 21. Agent Integration Contract
+## 32. Single-Phase Implementation Target
 
-The agent adapter should:
+The apply engine MVP can be implemented in one coherent phase because it has a small scope.
+
+Single-phase target:
 
 ```text
-- load desired config using nats-agent-core
-- extract payload JSON
-- provide target/config_uuid/schema_name/schema_version to renderer
-- call renderer
-- pass rendered_text to internal apply/reconcile engine
+- public apply package
+- typed apply errors
+- Plan and Apply APIs
+- rendered set-command parser/validator
+- managed reset policy
+- temporary runtime state
+- fake executor tests
+- real executor boundary
+- no NATS integration inside this repo
+- no old-vs-new diff mode
+- no live config parsing
+- no save by default
 ```
 
-The renderer must not import agent internals.
-
-The agent must not expose renderer internals over NATS. NATS subjects trigger handlers; handlers call internal services.
+Review should still keep the internal files separated by responsibility.
 
 ---
 
-## 22. Apply/Reconcile Boundary
+## 33. Acceptance Criteria
 
-Renderer output is desired `set` commands only.
-
-The agent apply layer owns:
+Renderer acceptance:
 
 ```text
-- comparing old desired state and new desired state
-- deciding delete commands
-- preserving protected config
-- executing set/delete commands
-- commit
-- save
-- discard on failure
+- go build ./... succeeds
+- go test ./... succeeds
+- canonical interface example renders expected set commands
+- canonical NAT example renders expected set commands
+- NAT absent does not generate NAT
+- unsupported target/schema/version returns typed errors
+- metadata mismatch returns typed error
+- output is deterministic
 ```
 
-The renderer should not generate delete commands in the MVP.
+Apply acceptance:
+
+```text
+- public apply package exists
+- Plan validates commands and returns deterministic managed reset plan
+- Apply uses executor interface and fake executor tests pass
+- full config deletion is impossible by default
+- unknown/protected config is preserved by default
+- commit-only is default
+- save is disabled by default
+- temporary state is updated only after success
+- failed apply does not update temporary state
+- no NATS/KV/result/status logic is added to this repo
+```
+
+NATS integration acceptance belongs to `olg-server-vyos-client-natagent`:
+
+```text
+- configure handler loads desired from KV
+- configure handler calls renderer then apply
+- render failure publishes failure result and skips apply
+- apply failure publishes failure result and does not mark config applied
+- missed notification is recovered by startup reconcile
+```
 
 ---
 
-## 23. Future Roadmap
+## 34. Future Roadmap
 
 Future renderer work:
 
@@ -1023,37 +1614,23 @@ Future renderer work:
 - VyOS schema command-path validation
 ```
 
-Future agent-side work:
+Future apply work:
 
 ```text
-- last-applied plan storage
-- diff/reconcile apply engine
-- protected config policy
+- configurable managed path policy loaded by caller
+- persistent apply state option
+- optional save-after-commit mode
+- commit-confirm support
+- old-vs-new diff apply mode
 - live config drift detection
-- non-interactive VyOS operation wrapper
+- expanded managed roots for future rendered sections
 ```
 
 ---
 
-## 24. Acceptance Criteria for MVP
+## 35. Summary
 
-```text
-- go build ./... succeeds
-- go test ./... succeeds
-- canonical interface example renders expected set commands
-- canonical NAT example renders expected set commands
-- NAT absent does not generate NAT
-- unsupported target/schema/version returns typed errors
-- metadata mismatch returns typed error
-- output is deterministic
-- no NATS/KV/apply/shell/device execution logic is added
-```
-
----
-
-## 25. Summary
-
-`olg-renderer-vyos` is a pure renderer.
+`olg-renderer-vyos` should evolve from a pure renderer into a small VyOS render/apply library.
 
 It receives:
 
@@ -1061,10 +1638,25 @@ It receives:
 metadata + OLG/uCentral JSON
 ```
 
-It returns:
+It renders:
 
 ```text
 VyOS CLI set-command text
 ```
 
-It does not apply, delete, reconcile, connect to NATS, or inspect the device.
+It applies:
+
+```text
+managed reset of cloud-owned sections + rendered set commands + commit
+```
+
+It does not:
+
+```text
+connect to NATS
+read/write KV
+publish results
+expose cloud commands
+inspect live device inventory
+save by default
+```
