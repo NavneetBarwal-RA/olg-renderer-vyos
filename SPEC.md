@@ -781,7 +781,7 @@ Expected public API direction:
 package apply
 
 func New(opts ...Option) (*Engine, error)
-func (e *Engine) Plan(ctx context.Context, input Input) (Plan, error)
+func (e *Engine) Prepare(ctx context.Context, input Input) (Plan, error)
 func (e *Engine) Apply(ctx context.Context, input Input) (Result, error)
 func GetInfo() Info
 ```
@@ -796,6 +796,12 @@ type Input struct {
 }
 ```
 
+Rule:
+
+```text
+ConfigUUID is metadata for traceability/result context only. The apply package must not use ConfigUUID for duplicate detection.
+```
+
 Expected public result shape:
 
 ```go
@@ -803,7 +809,6 @@ type Result struct {
     Target         string
     ConfigUUID     string
     Applied        bool
-    Changed        bool
     Saved          bool
     DeleteCommands []string
     SetCommands    []string
@@ -824,14 +829,103 @@ func WithManagedPolicy(policy ManagedPolicy) Option
 API rules:
 
 ```text
-- Plan validates and returns deterministic delete/set operations only.
-- Plan must not execute commands, commit, save, discard, or update state.
-- Apply validates, plans, executes delete/set commands, commits, optionally saves if enabled, and returns Result.
-- Apply always executes the validated/planned commands it is given; it must not short-circuit on UUID comparison.
-- Apply does not compare desired UUID with applied UUID.
-- Apply does not persist applied UUID state.
-- ConfigUUID is metadata for traceability/result context only.
+- Prepare is the only non-executing apply-engine API.
+- Prepare returns what Apply would execute.
+- Apply executes the prepared operation and commits.
+- There is no DryRun field in Input.
+- Dry-run style inspection must use Prepare.
 - Avoid duplicate public apply APIs with overlapping meaning.
+```
+
+### Prepare semantics
+
+Prepare is the non-executing pre-apply API.
+
+Prepare must:
+
+```text
+- validate input metadata
+- parse DesiredCommands into command lines
+- reject unsafe or non-set commands
+- build the managed-reset delete command list
+- preserve unknown/protected config by policy
+- return a deterministic Plan
+```
+
+Prepare must not:
+
+```text
+- call the executor
+- enter VyOS configure mode
+- delete config
+- set config
+- commit
+- save
+- discard
+- publish status/result
+- update any local or external state
+```
+
+### Apply semantics
+
+Apply is the executing API.
+
+Apply must:
+
+```text
+- perform the same validation and plan preparation as Prepare
+- execute delete and set commands through the configured executor
+- apply delete and set commands in one candidate configuration session
+- commit the candidate configuration
+- save only if explicitly enabled
+- discard candidate config on failure where possible
+- return structured Result
+```
+
+Apply must not:
+
+```text
+- publish NATS status/result
+- read or write NATS KV
+- perform UUID-based duplicate detection
+- update VyOS NATS client applied UUID state
+```
+
+### Plan shape
+
+Plan is data, not an executing operation.
+
+Recommended shape:
+
+```go
+type Plan struct {
+    Target         string
+    ConfigUUID     string
+    DeleteCommands []string
+    SetCommands    []string
+    Commit         bool
+    Save           bool
+}
+```
+
+### Result shape
+
+Result represents actual Apply execution output.
+
+Recommended shape:
+
+```go
+type Result struct {
+    Target         string
+    ConfigUUID     string
+    Applied        bool
+    Saved          bool
+    DeleteCommands []string
+    SetCommands    []string
+    CommitOutput   string
+    SaveOutput     string
+    DiscardOutput  string
+}
 ```
 
 ---
@@ -1080,7 +1174,9 @@ Unit tests must not require real VyOS.
 
 ## 25. Apply Flow
 
-Apply must follow this flow:
+Prepare performs steps 1-4 only and returns Plan.
+
+Apply performs steps 1-8:
 
 ```text
 1. Validate input metadata.
@@ -1425,8 +1521,12 @@ full-mvp.set
 Required:
 
 ```text
-- Plan rejects unsafe commands
-- Plan creates managed reset delete commands
+- Prepare rejects unsafe commands
+- Prepare returns deterministic managed-reset delete/set plan
+- Prepare does not invoke executor
+- Apply invokes executor with the prepared plan
+- Apply commits through executor
+- Apply returns structured result
 - Apply first config executes managed reset and commit
 - NAT removal is handled by managed reset
 - VLAN removal is handled by managed reset
@@ -1533,7 +1633,7 @@ Single-phase target:
 ```text
 - public apply package
 - typed apply errors
-- Plan and Apply APIs
+- Prepare and Apply APIs
 - rendered set-command parser/validator
 - managed reset policy
 - fake executor tests
@@ -1568,7 +1668,11 @@ Apply acceptance:
 
 ```text
 - public apply package exists
-- Plan validates commands and returns deterministic managed reset plan
+- public Prepare API exists
+- Prepare validates commands and returns deterministic managed reset plan
+- Prepare never invokes executor or changes device state
+- Apply uses the same preparation logic and executes through executor
+- no DryRun field exists in apply.Input
 - Apply uses executor interface and fake executor tests pass
 - full config deletion is impossible by default
 - unknown/protected config is preserved by default

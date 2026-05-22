@@ -268,31 +268,41 @@ At a high level, the public package should provide:
 
 ```text
 - constructor for creating an apply engine
-- Plan API for validation and dry-run planning
-- Apply API for executing a managed reset and commit
-- package or instance metadata accessor
+- Prepare API for validation and pre-apply planning
+- Apply API for real execution and commit
+- package or instance metadata accessor if needed
 ```
 
 Expected public API direction:
 
 ```go
 func New(opts ...Option) (*Engine, error)
-func (e *Engine) Plan(ctx context.Context, input Input) (Plan, error)
+func (e *Engine) Prepare(ctx context.Context, input Input) (Plan, error)
 func (e *Engine) Apply(ctx context.Context, input Input) (Result, error)
 func GetInfo() Info
 ```
 
+Prepare is the non-executing pre-apply API.
+
+It validates renderer-generated set-command text and returns the deterministic managed-reset plan that Apply would execute.
+
+Prepare must not touch VyOS. It must not call the executor, commit, save, discard, publish status, or update any state.
+
+Prepare exists for tests, debugging, safety review, and dry-run style inspection.
+
 The APIs should be atomic and unique:
 
 ```text
-Plan:
+Prepare:
   validate rendered commands and return planned delete/set operations only
 
 Apply:
-  validate, plan, execute, commit, and optionally save when enabled
+  validate, prepare, execute delete/set commands, commit, optionally save if enabled, and return execution result
 ```
 
-Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `ApplyRenderedText`, or `ApplyDryRun`.
+Dry-run behavior is represented by Prepare, not by a DryRun field on Apply input.
+
+Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `ApplyRenderedText`, or `PreviewApply`.
 
 ---
 
@@ -479,7 +489,8 @@ Typical apply flow:
 ```text
 - create apply engine with executor and managed policy
 - pass renderer output into apply.Input
-- call Plan for dry-run/testing or Apply for real execution
+- call Prepare for validation, tests, debug, or safety preview
+- call Apply for real execution and commit
 - publish result/status from the caller, not from the apply package
 ```
 
@@ -490,6 +501,16 @@ applier, err := apply.New(
   apply.WithExecutor(vyosExecutor),
   apply.WithSaveAfterCommit(false),
 )
+
+plan, err := applier.Prepare(ctx, apply.Input{
+  Target:          rendered.Target,
+  ConfigUUID:      rendered.ConfigUUID,
+  DesiredCommands: rendered.RenderedText,
+})
+if err != nil {
+  log.Fatal(err)
+}
+_ = plan
 
 result, err := applier.Apply(ctx, apply.Input{
   Target:          rendered.Target,
@@ -832,7 +853,8 @@ Apply tests:
 - VLAN removed from desired config is removed by managed reset
 - protected/unknown paths are never deleted
 - invalid rendered command is rejected
-- dry-run Plan does not execute
+- Prepare validates rendered commands and returns a deterministic managed-reset plan
+- Prepare does not execute, commit, save, discard, or update state
 - commit failure returns typed error and attempts discard
 - save is disabled by default
 ```
