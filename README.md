@@ -331,6 +331,10 @@ For the renderer MVP, reset roots are:
 - nat source
 ```
 
+The apply engine uses a reset policy to decide which roots are deleted before rendered commands are applied.
+Anything not listed as a reset root is preserved from broad deletion by default.
+Future renderer sections must deliberately add matching reset roots.
+
 Protected/default/bootstrap roots are not deleted by default:
 
 ```text
@@ -524,6 +528,12 @@ Example apply usage after implementation:
 ```go
 applier, err := apply.New(
   apply.WithExecutor(vyosExecutor),
+  apply.WithResetPolicy(apply.ResetPolicy{
+    ResetRoots: []string{
+      "interfaces bridge",
+      "nat source",
+    },
+  }),
   apply.WithSaveAfterCommit(false),
 )
 

@@ -828,7 +828,7 @@ Expected options:
 ```go
 func WithExecutor(exec Executor) Option
 func WithSaveAfterCommit(enabled bool) Option
-func WithManagedPolicy(policy ManagedPolicy) Option
+func WithResetPolicy(policy ResetPolicy) Option
 ```
 
 API rules:
@@ -852,7 +852,7 @@ Prepare must:
 - validate input metadata
 - parse DesiredCommands into command lines
 - reject unsafe or non-set commands
-- build reset-root delete commands from the configured reset policy
+- build the reset-root delete command list from ResetPolicy
 - include rendered set commands
 - return a deterministic Plan
 ```
@@ -1017,6 +1017,25 @@ Reset roots are VyOS config roots that are controlled by cloud desired config an
 
 Protected roots are not blindly deleted. They contain default, bootstrap, recovery, agent, or management configuration.
 
+Reset policy data shape:
+
+```go
+type ResetPolicy struct {
+    ResetRoots []string
+}
+```
+
+MVP default policy:
+
+```go
+DefaultResetPolicy := ResetPolicy{
+    ResetRoots: []string{
+        "interfaces bridge",
+        "nat source",
+    },
+}
+```
+
 MVP reset roots:
 
 ```text
@@ -1041,11 +1060,13 @@ Rules:
 
 ```text
 - Delete only reset roots.
+- ResetRoots are explicit.
 - Never delete the full config.
-- Unknown roots are preserved unless deliberately added to reset roots.
+- Anything not listed in ResetRoots is preserved from broad deletion by default.
 - Manual/debug config under a reset root may be removed by cloud apply.
 - Preserved roots may still receive specific rendered set commands.
 - Future renderer sections must add matching reset roots explicitly.
+- WithResetPolicy replaces the default reset policy for that engine instance.
 ```
 
 For MVP, `nat source` is a cloud-controlled reset root.
@@ -1055,6 +1076,8 @@ Apply may delete `nat source` before applying rendered source NAT rules.
 Therefore, a reserved cloud-managed NAT rule ID range is not required for MVP.
 
 Manual/debug NAT source rules are not guaranteed to survive cloud apply.
+
+Future versions may add `ProtectedRoots` if explicit preservation documentation or validation becomes useful, but MVP preservation is defined by omission from `ResetRoots`.
 
 ---
 
@@ -1620,6 +1643,8 @@ Required:
 - Prepare includes `delete interfaces bridge`
 - Prepare includes `delete nat source`
 - Prepare does not include delete commands for protected roots
+- Prepare uses DefaultResetPolicy when no override is provided
+- WithResetPolicy replaces the default reset policy
 - Prepare allows set commands under preserved roots when emitted by renderer
 - Prepare with empty DesiredCommands returns reset-root delete commands and empty SetCommands
 - Empty DesiredCommands is not rejected when Target and ConfigUUID are valid
@@ -1773,12 +1798,16 @@ Apply acceptance:
 ```text
 - public apply package exists
 - public Prepare API exists
+- ResetPolicy is documented
+- default reset roots are documented
 - Prepare validates commands and returns deterministic reset-root plan
 - Prepare never invokes executor or changes device state
 - Apply uses the same preparation logic and executes through executor
 - no DryRun field exists in apply.Input
 - Apply uses executor interface and fake executor tests pass
 - Prepare returns reset-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
+- Prepare generates delete commands from ResetPolicy
+- roots outside ResetPolicy are preserved from broad deletion
 - Prepare includes rendered set commands after delete commands
 - empty DesiredCommands is valid
 - empty DesiredCommands produces reset-root delete plan
