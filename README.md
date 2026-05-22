@@ -324,6 +324,10 @@ cloud-authoritative reset with protected roots:
 The apply engine must not delete the full VyOS configuration.
 The apply engine should always apply the commands it is given unless validation, planning, execution, commit, or save fails.
 
+The real VyOS executor must execute validated delete/set command lists through a controlled VyOS configuration path. It must not run rendered command text through unsafe shell interpolation such as `sh -c "<command>"`.
+
+The apply package should pass structured delete/set command lists to the executor. The executor must not expose arbitrary shell command execution.
+
 For the renderer MVP, reset roots are:
 
 ```text

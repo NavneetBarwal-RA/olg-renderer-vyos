@@ -1229,6 +1229,21 @@ Executor responsibilities:
 - discard candidate config on failure where possible
 ```
 
+Executor safety requirements:
+
+```text
+- The real VyOS executor must not execute rendered command text through unsafe shell string interpolation.
+- Validated delete/set commands should be treated as VyOS configuration commands and passed to the VyOS configuration mechanism in a controlled way.
+- Avoid patterns such as `sh -c "<rendered command string>"`.
+- Do not concatenate untrusted rendered command text into an arbitrary shell script.
+- The executor should receive structured command lists from Plan:
+  - DeleteCommands
+  - SetCommands
+- The executor must not expose a generic arbitrary command execution API.
+```
+
+If a shell wrapper is unavoidable for the target VyOS environment, it must only receive commands that passed apply validation, must preserve command boundaries, must not allow arbitrary command injection, and must be covered by tests for command rejection and command ordering.
+
 Testing executor:
 
 ```text
@@ -1650,6 +1665,9 @@ Required:
 - Empty DesiredCommands is not rejected when Target and ConfigUUID are valid
 - Prepare does not invoke executor
 - Apply invokes executor with the prepared plan
+- unsafe shell metacharacters are rejected before executor invocation
+- executor receives structured DeleteCommands and SetCommands, not one arbitrary shell command string
+- real executor implementation avoids unsafe shell interpolation
 - Apply sends delete commands before set commands
 - Apply performs delete + set + commit in one candidate session
 - Apply with empty DesiredCommands executes reset-root delete commands and commits
@@ -1805,6 +1823,9 @@ Apply acceptance:
 - Apply uses the same preparation logic and executes through executor
 - no DryRun field exists in apply.Input
 - Apply uses executor interface and fake executor tests pass
+- real executor boundary is documented
+- executor does not expose arbitrary shell command execution
+- validated commands are passed as structured VyOS config operations
 - Prepare returns reset-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
 - Prepare generates delete commands from ResetPolicy
 - roots outside ResetPolicy are preserved from broad deletion
