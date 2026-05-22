@@ -11,7 +11,7 @@ renderer:
   OLG/uCentral JSON -> deterministic VyOS CLI set commands
 
 apply:
-  deterministic VyOS CLI set commands -> managed reset -> commit runtime config
+  deterministic VyOS CLI set commands -> cloud-authoritative reset with protected roots -> commit runtime config
 ```
 
 The repository must remain independent of NATS. NATS command handling, JetStream KV access, and result/status publishing belong to `nats-agent-core` and `olg-server-vyos-client-natagent`.
@@ -44,7 +44,10 @@ The renderer must be:
 The apply engine must be:
 
 ```text
-- explicit and allowlist-based
+- cloud-authoritative for production config
+- reset-root based, not full-config delete
+- protected/default/bootstrap roots preserved
+- safe one-transaction apply
 - safe against full device config deletion
 - independent of NATS
 - testable without real VyOS
@@ -124,7 +127,7 @@ renderer/
 apply/
   public apply engine API
   rendered command validation
-  managed reset planning
+  cloud-authoritative reset-root planning
   executor interface
   apply errors
 
@@ -847,8 +850,8 @@ Prepare must:
 - validate input metadata
 - parse DesiredCommands into command lines
 - reject unsafe or non-set commands
-- build the managed-reset delete command list
-- preserve unknown/protected config by policy
+- build reset-root delete commands from the configured reset policy
+- include rendered set commands
 - return a deterministic Plan
 ```
 
@@ -932,18 +935,22 @@ type Result struct {
 
 ## 19. Apply Engine MVP Strategy
 
-The MVP apply strategy is managed reset.
+The MVP apply strategy is cloud-authoritative reset with protected roots.
 
 ```text
-managed reset:
-  delete known cloud-owned VyOS sections
+cloud-authoritative reset with protected roots:
+  delete explicit cloud-controlled reset roots
   apply all rendered set commands
   commit once
 ```
 
+Cloud desired config is the production source of truth for the roots it controls.
+
 The MVP must not implement old-vs-new diff logic.
 
-The MVP must not delete full VyOS config.
+The MVP must not delete the full VyOS config.
+
+The MVP must not rely on NAT rule ID range ownership because `nat source` is reset as a cloud-controlled root.
 
 Rationale:
 
@@ -951,14 +958,14 @@ Rationale:
 - cloud sends full desired config
 - set-only apply leaves stale deleted cloud config behind
 - full device delete is unsafe
-- managed reset removes stale cloud-owned sections while preserving unknown/protected config
+- reset-root deletion removes stale cloud-owned sections while preserving protected roots
 ```
 
 Execution must use one candidate configuration transaction:
 
 ```text
 configure
-  delete managed sections
+  delete reset roots
   set rendered desired commands
   commit
 ```
@@ -967,56 +974,50 @@ Do not commit after delete and before set.
 
 ---
 
-## 20. Apply Managed Policy
+## 20. Apply Reset Roots and Protected Roots
 
-Deletion must be allowlist-based.
+Reset roots are VyOS config roots that are controlled by cloud desired config and may be deleted before applying rendered config.
 
-Default MVP managed roots:
+Protected roots are not blindly deleted. They contain default, bootstrap, recovery, agent, or management configuration.
 
-```text
-interfaces bridge <cloud bridge>
-nat source rule <cloud-managed rule>
-```
-
-Default cloud bridge set:
+MVP reset roots:
 
 ```text
-br0
-br1
-br2
-br3
-br4
-br5
-br6
-br7
-br8
-br9
+- interfaces bridge
+- nat source
 ```
 
-Default NAT source rule handling may start with either:
+MVP protected/preserved roots:
 
 ```text
-- configured managed rule IDs, or
-- managed rule ID range reserved for cloud-owned source NAT
+- system
+- service
+- interfaces ethernet
+- protocols
+- container
+- users
+- agent/bootstrap/recovery config
+- any root not explicitly listed as reset-owned
 ```
 
-The chosen policy must be explicit in code and tests.
-
-Never delete by default:
+Rules:
 
 ```text
-system
-service ssh
-protocols
-interfaces ethernet
-container
-users
-agent bootstrap config
-local recovery config
-unknown future config
+- Delete only reset roots.
+- Never delete the full config.
+- Unknown roots are preserved unless deliberately added to reset roots.
+- Manual/debug config under a reset root may be removed by cloud apply.
+- Preserved roots may still receive specific rendered set commands.
+- Future renderer sections must add matching reset roots explicitly.
 ```
 
-Future renderer sections must extend managed roots deliberately. For example, if DHCP rendering is added later, DHCP delete roots must be added explicitly at that time.
+For MVP, `nat source` is a cloud-controlled reset root.
+
+Apply may delete `nat source` before applying rendered source NAT rules.
+
+Therefore, a reserved cloud-managed NAT rule ID range is not required for MVP.
+
+Manual/debug NAT source rules are not guaranteed to survive cloud apply.
 
 ---
 
@@ -1059,6 +1060,18 @@ $
 The apply engine should not expose a generic arbitrary command execution API.
 
 Validation errors must happen before executor invocation.
+
+Rendered set commands may target preserved roots if the renderer intentionally emits specific leaf updates.
+
+Example:
+
+```text
+interfaces ethernet is preserved from broad delete.
+This still allows:
+  set interfaces ethernet eth0 description 'WAN'
+```
+
+The apply engine must not reject a `set` command only because its root is preserved from deletion.
 
 ---
 
@@ -1176,18 +1189,24 @@ Unit tests must not require real VyOS.
 
 Prepare performs steps 1-4 only and returns Plan.
 
-Apply performs steps 1-8:
+Apply performs steps 1-10:
 
 ```text
 1. Validate input metadata.
 2. Parse DesiredCommands into command lines.
 3. Reject unsafe or non-set commands.
-4. Build managed reset plan.
-5. Execute delete commands and set commands in one candidate session.
-6. Commit.
-7. Save only if explicitly enabled.
-8. Return Result.
+4. Build reset-root delete plan.
+5. Enter one VyOS candidate configuration session.
+6. Delete reset roots.
+7. Apply rendered set commands.
+8. Commit once.
+9. Save only if explicitly enabled.
+10. Return Result.
 ```
+
+Delete + set + commit must be one transaction.
+
+Do not commit after delete and before set.
 
 Failure flow:
 
@@ -1271,7 +1290,7 @@ Flow:
 4. Agent loads latest desired config from KV.
 5. Agent builds renderer.Input.
 6. Renderer returns set commands.
-7. Apply engine performs managed reset and applies set commands.
+7. Apply engine performs cloud-authoritative reset with protected roots and applies set commands.
 8. Apply engine commits and does not save by default.
 9. Agent updates temporary applied UUID state after render and apply both succeed.
 10. Agent publishes success result.
@@ -1301,7 +1320,7 @@ Flow:
 Goal:
 
 ```text
-Remove stale cloud-owned NAT rules without old-vs-new diff logic.
+Remove stale cloud-owned NAT source rules by resetting the cloud-owned `nat source` root.
 ```
 
 Old desired:
@@ -1317,11 +1336,10 @@ New desired:
 set nat source rule 100 ...
 ```
 
-Managed reset behavior:
+Cloud-authoritative reset behavior:
 
 ```text
-delete nat source rule 100
-delete nat source rule 110
+delete nat source
 set nat source rule 100 ...
 commit
 ```
@@ -1329,7 +1347,7 @@ commit
 Result:
 
 ```text
-rule 110 is removed and rule 100 is recreated from current desired config.
+rule 110 is removed because `nat source` is reset, and rule 100 is recreated from current desired config.
 ```
 
 ### UC-04: VLAN removed from desired config
@@ -1337,7 +1355,7 @@ rule 110 is removed and rule 100 is recreated from current desired config.
 Goal:
 
 ```text
-Remove stale cloud-owned bridge VIF config.
+Remove stale cloud-owned bridge VIF config by resetting `interfaces bridge`.
 ```
 
 Old desired contains:
@@ -1348,7 +1366,7 @@ set interfaces bridge br1 vif 10 ...
 
 New desired omits that VLAN.
 
-Managed reset behavior:
+Cloud-authoritative reset behavior:
 
 ```text
 delete interfaces bridge br1
@@ -1412,7 +1430,7 @@ Flow:
 
 ```text
 1. Renderer succeeds.
-2. Apply engine starts managed reset apply.
+2. Apply engine starts cloud-authoritative reset with protected roots.
 3. Delete, set, or commit fails.
 4. Apply engine discards candidate config where possible.
 5. Temporary applied UUID state is not updated.
@@ -1466,7 +1484,7 @@ Apply planning must avoid:
 ```text
 - random map iteration
 - live-device-dependent delete plan generation
-- hidden default deletes outside managed policy
+- hidden default deletes outside reset-root policy
 ```
 
 ---
@@ -1522,15 +1540,21 @@ Required:
 
 ```text
 - Prepare rejects unsafe commands
-- Prepare returns deterministic managed-reset delete/set plan
+- Prepare returns deterministic reset-root delete/set plan
+- Prepare includes `delete interfaces bridge`
+- Prepare includes `delete nat source`
+- Prepare does not include delete commands for protected roots
+- Prepare allows set commands under preserved roots when emitted by renderer
 - Prepare does not invoke executor
 - Apply invokes executor with the prepared plan
+- Apply sends delete commands before set commands
+- Apply performs delete + set + commit in one candidate session
 - Apply commits through executor
 - Apply returns structured result
-- Apply first config executes managed reset and commit
-- NAT removal is handled by managed reset
-- VLAN removal is handled by managed reset
-- unknown/protected paths are not deleted
+- Apply first config executes cloud-authoritative reset with protected roots and commit
+- NAT rule removal is handled by deleting `nat source`
+- VLAN removal is handled by resetting `interfaces bridge`
+- protected roots are not deleted
 - commit failure returns typed error and attempts discard
 - save disabled by default
 ```
@@ -1635,7 +1659,7 @@ Single-phase target:
 - typed apply errors
 - Prepare and Apply APIs
 - rendered set-command parser/validator
-- managed reset policy
+- cloud-authoritative reset-root policy
 - fake executor tests
 - real executor boundary
 - no apply-owned temporary applied UUID state
@@ -1669,13 +1693,19 @@ Apply acceptance:
 ```text
 - public apply package exists
 - public Prepare API exists
-- Prepare validates commands and returns deterministic managed reset plan
+- Prepare validates commands and returns deterministic reset-root plan
 - Prepare never invokes executor or changes device state
 - Apply uses the same preparation logic and executes through executor
 - no DryRun field exists in apply.Input
 - Apply uses executor interface and fake executor tests pass
-- full config deletion is impossible by default
-- unknown/protected config is preserved by default
+- Prepare returns reset-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
+- Prepare includes rendered set commands after delete commands
+- Apply executes delete and set commands in one candidate session
+- Apply commits once
+- Apply does not delete full config
+- Apply does not delete protected roots
+- NAT source stale rules are removed by deleting `nat source`, not NAT rule range diff
+- manual/debug config under reset roots is not guaranteed to survive
 - commit-only is default
 - save is disabled by default
 - no NATS/KV/result/status logic is added to this repo
@@ -1716,13 +1746,15 @@ Future renderer work:
 Future apply work:
 
 ```text
-- configurable managed path policy loaded by caller
+- configurable reset roots
+- configurable protected roots
+- optional baseline set commands if required later
 - optional hooks for externally owned applied-state workflows
 - optional save-after-commit mode
 - commit-confirm support
-- old-vs-new diff apply mode
-- live config drift detection
-- expanded managed roots for future rendered sections
+- live config drift inspection
+- old-vs-new diff mode if manual/local config preservation becomes a requirement
+- expanded reset roots for future rendered sections
 ```
 
 ---
@@ -1746,7 +1778,7 @@ VyOS CLI set-command text
 It applies:
 
 ```text
-managed reset of cloud-owned sections + rendered set commands + commit
+cloud-authoritative reset with protected roots + rendered set commands + commit
 ```
 
 It does not:

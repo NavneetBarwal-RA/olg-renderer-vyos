@@ -2,14 +2,14 @@
 
 `olg-renderer-vyos` is the VyOS configuration library for OLG/uCentral desired configuration.
 
-The repository currently provides the renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands. The next intended repository addition is a public apply engine that consumes those rendered commands and applies them to VyOS through a safe managed-reset flow.
+The repository currently provides the renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands. The next intended repository addition is a public apply engine that consumes those rendered commands and applies them to VyOS through cloud-authoritative reset with protected roots.
 
 ```text
 OLG/uCentral JSON
   -> renderer
   -> deterministic VyOS set commands
   -> apply engine
-  -> managed reset of cloud-owned sections
+  -> cloud-authoritative reset of cloud-controlled roots
   -> set rendered desired config
   -> commit runtime config
 ```
@@ -31,7 +31,7 @@ Intended next capability:
 
 ```text
 apply:
-  VyOS set-command text -> safe managed reset -> commit
+  VyOS set-command text -> cloud-authoritative reset with protected roots -> commit
 ```
 
 The renderer and apply engine should live in the same repository but remain separate public packages.
@@ -65,7 +65,7 @@ internal/vyos/
 - renderer fixtures and golden tests
 - public apply engine facade used by olg-server-vyos-client-natagent
 - validation of renderer-generated set commands before apply
-- managed-reset apply planning for cloud-owned VyOS sections
+- cloud-authoritative reset-root apply planning for cloud-controlled reset roots
 - commit-only runtime apply by default
 - fake executor tests and real VyOS executor boundary
 ```
@@ -135,13 +135,15 @@ olg-server-vyos-client-natagent
   -> LoadDesiredConfig(ctx, target)
   -> compare desired UUID with temporary applied UUID
   -> if same UUID: publish already_in_sync/success and skip render/apply
-  -> if different UUID: extract desired payload
-  -> build renderer input metadata
+  -> if different UUID: build renderer input metadata
   -> call renderer.Render(...)
   -> receive rendered VyOS set commands
-  -> call apply.Engine.Apply(...)
+  -> call apply.Engine.Prepare(...) or apply.Engine.Apply(...)
+  -> if Apply is called: delete cloud-controlled reset roots
+  -> if Apply is called: apply rendered set commands
+  -> if Apply is called: commit once
   -> update temporary applied UUID after successful apply
-  -> publish configure result/status through nats-agent-core
+  -> publish configure result/status
 ```
 
 The renderer receives only the desired payload and metadata provided by the caller. It does not read from NATS KV directly.
@@ -284,7 +286,7 @@ func GetInfo() Info
 
 Prepare is the non-executing pre-apply API.
 
-It validates renderer-generated set-command text and returns the deterministic managed-reset plan that Apply would execute.
+It validates renderer-generated set-command text and returns the deterministic cloud-authoritative reset plan that Apply would execute.
 
 Prepare must not touch VyOS. It must not call the executor, commit, save, discard, publish status, or update any state.
 
@@ -308,11 +310,13 @@ Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `App
 
 ## Apply Engine Behavior
 
-The initial apply mode should be managed reset.
+The initial apply mode is cloud-authoritative reset with protected roots.
+
+Cloud desired config is the production source of truth for cloud-controlled roots.
 
 ```text
-managed reset:
-  delete only known cloud-owned VyOS sections
+cloud-authoritative reset with protected roots:
+  delete only explicit cloud-controlled reset roots
   apply all newly rendered set commands
   commit once
 ```
@@ -320,29 +324,44 @@ managed reset:
 The apply engine must not delete the full VyOS configuration.
 The apply engine should always apply the commands it is given unless validation, planning, execution, commit, or save fails.
 
-Use allowlist-based deletion:
+For the renderer MVP, reset roots are:
 
 ```text
-allowed managed delete roots:
-  interfaces bridge <cloud bridge>
-  nat source rule <cloud-managed rule>
+- interfaces bridge
+- nat source
 ```
 
-Preserve everything else by default:
+Protected/default/bootstrap roots are not deleted by default:
 
 ```text
-system
-service ssh
-protocols
-interfaces ethernet
-users
-container
-agent bootstrap config
-local recovery config
-unknown future config
+- system
+- service
+- interfaces ethernet
+- protocols
+- container
+- users
+- agent/bootstrap/recovery config
+- any root not explicitly listed as reset-owned
 ```
 
-This avoids old-vs-new diff logic in the MVP while still removing stale cloud-owned bridge, VLAN, and NAT configuration.
+Protected roots are preserved from blind deletion because they may contain bootstrap, management, recovery, or device-default configuration.
+
+Preserved roots may still receive specific `set` commands from renderer output if required. Preservation only prevents broad delete operations.
+
+For MVP, cloud owns the `nat source` tree. The apply engine may delete `nat source` before applying rendered source NAT rules.
+
+Because `nat source` is reset as a cloud-controlled root, a cloud-managed NAT rule ID range is not required for MVP.
+
+Manual/debug NAT source rules are not guaranteed to survive a cloud configure apply.
+
+Manual/debug configuration under any cloud-controlled reset root is not guaranteed to survive a cloud configure apply.
+
+Final runtime config after successful apply:
+
+```text
+preserved protected/default/bootstrap config
+  + rendered cloud desired config
+```
 
 ---
 
@@ -487,7 +506,7 @@ func main() {
 Typical apply flow:
 
 ```text
-- create apply engine with executor and managed policy
+- create apply engine with executor and reset-root/protected-root policy
 - pass renderer output into apply.Input
 - call Prepare for validation, tests, debug, or safety preview
 - call Apply for real execution and commit
@@ -848,12 +867,16 @@ Renderer tests:
 Apply tests:
 
 ```text
-- first apply executes managed reset and commit
-- NAT rule removed from desired config is removed by managed reset
-- VLAN removed from desired config is removed by managed reset
-- protected/unknown paths are never deleted
+- first apply executes cloud-authoritative reset with protected roots and commit
+- Prepare includes `delete interfaces bridge`
+- Prepare includes `delete nat source`
+- Prepare does not include delete commands for protected roots
+- Prepare allows set commands under preserved roots when emitted by renderer
+- Apply sends delete commands before set commands
+- Apply performs delete + set + commit in one candidate session
+- NAT rule removal is handled by deleting `nat source`
 - invalid rendered command is rejected
-- Prepare validates rendered commands and returns a deterministic managed-reset plan
+- Prepare validates rendered commands and returns a deterministic reset-root delete/set plan
 - Prepare does not execute, commit, save, discard, or update state
 - commit failure returns typed error and attempts discard
 - save is disabled by default
@@ -901,11 +924,13 @@ Future renderer work may include:
 Future apply work may include:
 
 ```text
-- configurable managed path policy
+- configurable reset roots
+- configurable protected roots
+- optional baseline set commands if required later
 - optional hooks for externally owned applied-state workflows
 - optional save-after-commit mode
 - commit-confirm support
-- live config drift detection
+- live config drift inspection
 - old-vs-new diff mode
 - VyOS schema validation for generated command paths
 ```
@@ -933,7 +958,7 @@ renderer:
   OLG/uCentral JSON -> VyOS set commands
 
 apply:
-  VyOS set commands -> managed reset -> commit runtime config
+  VyOS set commands -> cloud-authoritative reset with protected roots -> commit runtime config
 
 vyos-nats-agent:
   NATS lifecycle, KV loading, renderer/apply orchestration, result publishing
