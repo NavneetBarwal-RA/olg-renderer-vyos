@@ -317,7 +317,7 @@ Cloud desired config is the production source of truth for cloud-controlled root
 ```text
 cloud-authoritative reset with protected roots:
   delete only explicit cloud-controlled reset roots
-  apply all newly rendered set commands
+  apply rendered set commands (if any)
   commit once
 ```
 
@@ -348,6 +348,10 @@ Protected roots are preserved from blind deletion because they may contain boots
 
 Preserved roots may still receive specific `set` commands from renderer output if required. Preservation only prevents broad delete operations.
 
+Empty rendered command text is valid.
+
+If the renderer returns no set commands, the apply engine should still delete the configured reset roots and commit. This removes all cloud-controlled config for currently supported sections while preserving protected/default/bootstrap config.
+
 For MVP, cloud owns the `nat source` tree. The apply engine may delete `nat source` before applying rendered source NAT rules.
 
 Because `nat source` is reset as a cloud-controlled root, a cloud-managed NAT rule ID range is not required for MVP.
@@ -362,6 +366,8 @@ Final runtime config after successful apply:
 preserved protected/default/bootstrap config
   + rendered cloud desired config
 ```
+
+If rendered command text is empty, the final runtime config after apply is only the preserved protected/default/bootstrap config.
 
 ---
 
@@ -507,9 +513,9 @@ Typical apply flow:
 
 ```text
 - create apply engine with executor and reset-root/protected-root policy
-- pass renderer output into apply.Input
-- call Prepare for validation, tests, debug, or safety preview
-- call Apply for real execution and commit
+- pass renderer output into apply.Input, even if RenderedText is empty
+- call Prepare for validation/safety preview
+- call Apply for real reset-root deletion and commit
 - publish result/status from the caller, not from the apply package
 ```
 
@@ -872,6 +878,7 @@ Apply tests:
 - Prepare includes `delete nat source`
 - Prepare does not include delete commands for protected roots
 - Prepare allows set commands under preserved roots when emitted by renderer
+- empty DesiredCommands deletes reset roots and commits with no set commands
 - Apply sends delete commands before set commands
 - Apply performs delete + set + commit in one candidate session
 - NAT rule removal is handled by deleting `nat source`

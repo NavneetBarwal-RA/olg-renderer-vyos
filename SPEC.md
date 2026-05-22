@@ -803,6 +803,8 @@ Rule:
 
 ```text
 ConfigUUID is metadata for traceability/result context only. The apply package must not use ConfigUUID for duplicate detection.
+DesiredCommands may be empty.
+An empty DesiredCommands value means there are no rendered cloud set commands for currently supported renderer sections. It does not mean the apply operation should be skipped.
 ```
 
 Expected public result shape:
@@ -855,6 +857,27 @@ Prepare must:
 - return a deterministic Plan
 ```
 
+Prepare must accept empty DesiredCommands when Target and ConfigUUID are valid.
+
+For empty DesiredCommands, Prepare must still build a reset-root delete plan and return an empty SetCommands list.
+
+Example plan:
+
+```text
+DeleteCommands:
+  delete interfaces bridge
+  delete nat source
+
+SetCommands:
+  <empty>
+
+Commit:
+  true
+
+Save:
+  false
+```
+
 Prepare must not:
 
 ```text
@@ -885,6 +908,18 @@ Apply must:
 - return structured Result
 ```
 
+Apply must accept empty DesiredCommands when metadata is valid.
+
+For empty DesiredCommands, Apply must:
+
+```text
+- enter one candidate configuration session
+- delete reset roots
+- apply no rendered set commands
+- commit once
+- save only if explicitly enabled
+```
+
 Apply must not:
 
 ```text
@@ -897,6 +932,8 @@ Apply must not:
 ### Plan shape
 
 Plan is data, not an executing operation.
+
+For empty DesiredCommands, `SetCommands` is an empty list and `DeleteCommands` still contains reset-root deletes.
 
 Recommended shape:
 
@@ -1193,12 +1230,12 @@ Apply performs steps 1-10:
 
 ```text
 1. Validate input metadata.
-2. Parse DesiredCommands into command lines.
-3. Reject unsafe or non-set commands.
+2. Parse DesiredCommands into command lines. Empty command list is valid.
+3. Reject unsafe or non-set commands if any command lines are present.
 4. Build reset-root delete plan.
 5. Enter one VyOS candidate configuration session.
 6. Delete reset roots.
-7. Apply rendered set commands.
+7. Apply rendered set commands if any exist.
 8. Commit once.
 9. Save only if explicitly enabled.
 10. Return Result.
@@ -1238,6 +1275,10 @@ apply_failed
 ```
 
 The agent may map apply errors to a wire error code such as `apply_failed`, while preserving the typed apply error internally for logs.
+
+Empty DesiredCommands is not an error by itself.
+
+Empty DesiredCommands must not produce `invalid_input`, `missing_config`, or `invalid_command` when required metadata is present.
 
 ---
 
@@ -1455,6 +1496,41 @@ Flow:
 5. Agent renders and applies if runtime state does not match.
 ```
 
+### UC-09: Cloud removes all currently supported config
+
+Goal:
+
+```text
+Remove all cloud-controlled config for currently supported renderer sections.
+```
+
+Input:
+
+```text
+desired config has no renderable interfaces or NAT rules
+```
+
+Renderer output:
+
+```text
+empty RenderedText
+```
+
+Apply behavior:
+
+```text
+delete interfaces bridge
+delete nat source
+commit
+```
+
+Result:
+
+```text
+protected/default/bootstrap config remains
+old bridge and NAT source config is removed
+```
+
 ---
 
 ## 29. Deterministic Output Requirements
@@ -1545,10 +1621,14 @@ Required:
 - Prepare includes `delete nat source`
 - Prepare does not include delete commands for protected roots
 - Prepare allows set commands under preserved roots when emitted by renderer
+- Prepare with empty DesiredCommands returns reset-root delete commands and empty SetCommands
+- Empty DesiredCommands is not rejected when Target and ConfigUUID are valid
 - Prepare does not invoke executor
 - Apply invokes executor with the prepared plan
 - Apply sends delete commands before set commands
 - Apply performs delete + set + commit in one candidate session
+- Apply with empty DesiredCommands executes reset-root delete commands and commits
+- Empty DesiredCommands does not skip reset-root deletion
 - Apply commits through executor
 - Apply returns structured result
 - Apply first config executes cloud-authoritative reset with protected roots and commit
@@ -1700,6 +1780,10 @@ Apply acceptance:
 - Apply uses executor interface and fake executor tests pass
 - Prepare returns reset-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
 - Prepare includes rendered set commands after delete commands
+- empty DesiredCommands is valid
+- empty DesiredCommands produces reset-root delete plan
+- Apply with empty DesiredCommands deletes reset roots and commits
+- empty DesiredCommands can remove all currently supported cloud-controlled config
 - Apply executes delete and set commands in one candidate session
 - Apply commits once
 - Apply does not delete full config
