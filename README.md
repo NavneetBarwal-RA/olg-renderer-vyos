@@ -67,7 +67,6 @@ internal/vyos/
 - validation of renderer-generated set commands before apply
 - managed-reset apply planning for cloud-owned VyOS sections
 - commit-only runtime apply by default
-- temporary runtime apply state for current boot optimization
 - fake executor tests and real VyOS executor boundary
 ```
 
@@ -76,6 +75,7 @@ internal/vyos/
 ```text
 - NATS or JetStream connections
 - KV read/write
+- temporary applied UUID state persistence/comparison
 - configure/action handler registration
 - result/status publishing
 - cloud command envelopes
@@ -95,7 +95,13 @@ apply package:
   must not render OLG/uCentral JSON and must not know about NATS subjects or KV
 
 olg-server-vyos-client-natagent:
-  loads desired config from KV, calls renderer, calls apply, and publishes results
+  loads desired config from KV
+  owns temporary applied UUID state for current boot optimization
+  compares desired UUID with applied UUID before renderer/apply
+  performs startup reconcile from KV
+  publishes already_in_sync/success when UUID matches
+  updates applied UUID only after renderer and apply both succeed
+  calls renderer, calls apply, and publishes results
 ```
 
 ---
@@ -127,17 +133,21 @@ olg-renderer-vyos
 olg-server-vyos-client-natagent
   -> receive cmd.configure.vyos
   -> LoadDesiredConfig(ctx, target)
-  -> extract desired payload
+  -> compare desired UUID with temporary applied UUID
+  -> if same UUID: publish already_in_sync/success and skip render/apply
+  -> if different UUID: extract desired payload
   -> build renderer input metadata
   -> call renderer.Render(...)
   -> receive rendered VyOS set commands
   -> call apply.Engine.Apply(...)
+  -> update temporary applied UUID after successful apply
   -> publish configure result/status through nats-agent-core
 ```
 
 The renderer receives only the desired payload and metadata provided by the caller. It does not read from NATS KV directly.
 
 The apply engine receives only rendered VyOS set-command text and apply metadata. It does not publish NATS results and does not load desired config from KV.
+`ConfigUUID` is metadata for traceability and result shaping; duplicate-detection ownership remains in the VyOS NATS client.
 
 ---
 
@@ -279,7 +289,7 @@ Plan:
   validate rendered commands and return planned delete/set operations only
 
 Apply:
-  validate, plan, execute, commit, and update temporary runtime state after success
+  validate, plan, execute, commit, and optionally save when enabled
 ```
 
 Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `ApplyRenderedText`, or `ApplyDryRun`.
@@ -298,6 +308,7 @@ managed reset:
 ```
 
 The apply engine must not delete the full VyOS configuration.
+The apply engine should always apply the commands it is given unless validation, planning, execution, commit, or save fails.
 
 Use allowlist-based deletion:
 
@@ -356,37 +367,36 @@ Saving after commit may be supported later as an explicit option, but it must no
 
 ---
 
-## Temporary Apply State
+## VyOS NATS Client Temporary Applied State
 
-The apply engine should store only temporary runtime apply state by default.
+The temporary applied state belongs to `olg-server-vyos-client-natagent`.
 
 Recommended default path:
 
 ```text
-/run/olg-vyos-apply/state.json
+/run/olg-vyos-client/applied-state.json
 ```
 
-State is used only to avoid reapplying the same desired config during the same boot.
+It stores the latest desired config UUID that was successfully rendered and applied during the current boot.
 
 Recommended state fields:
 
 ```json
 {
   "target": "vyos",
-  "config_uuid": "cfg-123",
-  "rendered_hash": "sha256:...",
-  "applied_at": "2026-05-22T00:00:00Z",
-  "mode": "managed_reset"
+  "applied_uuid": "cfg-123",
+  "applied_at": "2026-05-22T00:00:00Z"
 }
 ```
 
 Rules:
 
 ```text
-- state is updated only after successful commit
+- state is updated only after renderer.Render and apply.Engine.Apply both succeed
 - state is not updated after render/apply/commit failure
 - state is temporary and may disappear after reboot
 - if state is missing after reboot, the agent re-applies latest desired config from KV
+- renderer and apply packages do not own this state
 ```
 
 ---
@@ -467,7 +477,7 @@ func main() {
 Typical apply flow:
 
 ```text
-- create apply engine with executor, runtime state path, and managed policy
+- create apply engine with executor and managed policy
 - pass renderer output into apply.Input
 - call Plan for dry-run/testing or Apply for real execution
 - publish result/status from the caller, not from the apply package
@@ -478,7 +488,6 @@ Example apply usage after implementation:
 ```go
 applier, err := apply.New(
   apply.WithExecutor(vyosExecutor),
-  apply.WithStatePath("/run/olg-vyos-apply/state.json"),
   apply.WithSaveAfterCommit(false),
 )
 
@@ -765,7 +774,6 @@ olg-renderer-vyos/
     parser.go
     policy.go
     planner.go
-    state.go
 
   internal/
     normalize/
@@ -819,15 +827,20 @@ Renderer tests:
 Apply tests:
 
 ```text
-- first apply with no temporary state
-- same UUID/hash skips apply during same boot
+- first apply executes managed reset and commit
 - NAT rule removed from desired config is removed by managed reset
 - VLAN removed from desired config is removed by managed reset
 - protected/unknown paths are never deleted
 - invalid rendered command is rejected
 - dry-run Plan does not execute
-- commit failure does not update temporary state
+- commit failure returns typed error and attempts discard
 - save is disabled by default
+```
+
+NATS client integration responsibility:
+
+```text
+- VyOS NATS client skips render/apply when desired UUID equals temporary applied UUID
 ```
 
 Golden renderer test flow:
@@ -867,7 +880,7 @@ Future apply work may include:
 
 ```text
 - configurable managed path policy
-- persistent apply state option
+- optional hooks for externally owned applied-state workflows
 - optional save-after-commit mode
 - commit-confirm support
 - live config drift detection

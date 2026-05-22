@@ -125,7 +125,6 @@ apply/
   public apply engine API
   rendered command validation
   managed reset planning
-  temporary runtime state
   executor interface
   apply errors
 
@@ -794,7 +793,6 @@ type Input struct {
     Target          string
     ConfigUUID      string
     DesiredCommands string
-    DryRun          bool
 }
 ```
 
@@ -806,7 +804,6 @@ type Result struct {
     ConfigUUID     string
     Applied        bool
     Changed        bool
-    DryRun         bool
     Saved          bool
     DeleteCommands []string
     SetCommands    []string
@@ -820,7 +817,6 @@ Expected options:
 
 ```go
 func WithExecutor(exec Executor) Option
-func WithStatePath(path string) Option
 func WithSaveAfterCommit(enabled bool) Option
 func WithManagedPolicy(policy ManagedPolicy) Option
 ```
@@ -828,9 +824,13 @@ func WithManagedPolicy(policy ManagedPolicy) Option
 API rules:
 
 ```text
-- Plan is pure planning and must not execute commands or update state.
-- Apply validates, plans, executes, commits, and updates temporary state after success.
-- DryRun on Apply must behave like Plan plus Result shaping, without execution or state update.
+- Plan validates and returns deterministic delete/set operations only.
+- Plan must not execute commands, commit, save, discard, or update state.
+- Apply validates, plans, executes delete/set commands, commits, optionally saves if enabled, and returns Result.
+- Apply always executes the validated/planned commands it is given; it must not short-circuit on UUID comparison.
+- Apply does not compare desired UUID with applied UUID.
+- Apply does not persist applied UUID state.
+- ConfigUUID is metadata for traceability/result context only.
 - Avoid duplicate public apply APIs with overlapping meaning.
 ```
 
@@ -968,14 +968,16 @@ Validation errors must happen before executor invocation.
 
 ---
 
-## 22. Apply State
+## 22. VyOS NATS Client Temporary Applied State
 
-Default apply state is temporary runtime state.
+The temporary applied-config state is owned by `olg-server-vyos-client-natagent`, not by the renderer or apply package.
 
-Recommended default path:
+The controller guarantees that every desired config write to KV receives a new UUID. Therefore, the VyOS NATS client can use UUID comparison as the current-boot duplicate-work guard.
+
+Recommended path:
 
 ```text
-/run/olg-vyos-apply/state.json
+/run/olg-vyos-client/applied-state.json
 ```
 
 State fields:
@@ -983,10 +985,8 @@ State fields:
 ```json
 {
   "target": "vyos",
-  "config_uuid": "cfg-123",
-  "rendered_hash": "sha256:...",
-  "applied_at": "2026-05-22T00:00:00Z",
-  "mode": "managed_reset"
+  "applied_uuid": "cfg-123",
+  "applied_at": "2026-05-22T00:00:00Z"
 }
 ```
 
@@ -994,20 +994,11 @@ Rules:
 
 ```text
 - if state is missing, treat config as not applied
-- if ConfigUUID and rendered hash match, apply may return Changed=false
-- state is updated only after successful commit
-- state is not updated after validation, execution, commit, or save failure
+- if applied_uuid equals desired.Record.UUID, the agent may skip renderer and apply
+- the state is updated only after render and apply both succeed
+- the state is not updated after render, validation, execution, commit, or save failure
 - state disappearance after reboot is expected
-```
-
-This supports KV as the source of truth:
-
-```text
-reboot
-  -> default saved VyOS config starts
-  -> agent reconnects to NATS
-  -> latest desired config is loaded from KV
-  -> render/apply runs again
+- renderer and apply packages may receive ConfigUUID as metadata but must not own this comparison
 ```
 
 ---
@@ -1095,23 +1086,18 @@ Apply must follow this flow:
 1. Validate input metadata.
 2. Parse DesiredCommands into command lines.
 3. Reject unsafe or non-set commands.
-4. Compute normalized rendered command hash.
-5. Load temporary runtime state.
-6. If same ConfigUUID and hash already applied, return Changed=false.
-7. Build managed reset plan.
-8. If DryRun, return planned operations without execution or state update.
-9. Execute delete commands and set commands in one candidate session.
-10. Commit.
-11. Save only if explicitly enabled.
-12. Write temporary state only after successful commit/save policy completion.
-13. Return Result.
+4. Build managed reset plan.
+5. Execute delete commands and set commands in one candidate session.
+6. Commit.
+7. Save only if explicitly enabled.
+8. Return Result.
 ```
 
 Failure flow:
 
 ```text
 - discard candidate config where possible
-- do not update temporary state
+- do not update any applied UUID state because that state is owned by the VyOS NATS client
 - return typed apply error
 ```
 
@@ -1127,8 +1113,6 @@ Required categories:
 invalid_input
 invalid_command
 plan_failed
-state_load_failed
-state_save_failed
 executor_failed
 delete_failed
 set_failed
@@ -1154,17 +1138,21 @@ Configure handler flow:
 3. Publish received/loading status.
 4. Load latest desired config from KV.
 5. Validate target and UUID against notification.
-6. Check local runtime apply state if the agent owns the state check.
-7. Build renderer.Input.
-8. Call renderer.Render.
-9. Build apply.Input from renderer.Output.RenderedText.
-10. Call apply.Engine.Apply.
-11. Publish success/failure result.
+6. Load temporary applied UUID state.
+7. If applied_uuid == desired.Record.UUID:
+     publish already_in_sync status and success result
+     skip renderer and apply
+8. Build renderer.Input.
+9. Call renderer.Render.
+10. Build apply.Input from renderer.Output.RenderedText.
+11. Call apply.Engine.Apply.
+12. Update temporary applied UUID state only after render and apply both succeed.
+13. Publish success/failure result.
 ```
 
 The apply package must not publish NATS messages.
 
-Applied UUID/status must be updated only after render and apply both succeed.
+Applied UUID state ownership remains outside the renderer/apply packages.
 
 ---
 
@@ -1189,7 +1177,7 @@ Flow:
 6. Renderer returns set commands.
 7. Apply engine performs managed reset and applies set commands.
 8. Apply engine commits and does not save by default.
-9. Temporary state is updated after success.
+9. Agent updates temporary applied UUID state after render and apply both succeed.
 10. Agent publishes success result.
 ```
 
@@ -1198,16 +1186,18 @@ Flow:
 Goal:
 
 ```text
-Avoid unnecessary render/apply when the same UUID and rendered hash are already applied.
+Avoid unnecessary render/apply when the same UUID is already applied during the current boot.
 ```
 
 Flow:
 
 ```text
 1. Agent receives configure notification for same UUID.
-2. Agent/apply state indicates same UUID and hash already applied.
-3. Apply returns Changed=false or agent short-circuits before apply.
-4. Agent publishes already_in_sync status and success result.
+2. Agent loads desired config from KV.
+3. Agent loads temporary applied UUID state.
+4. applied_uuid == desired.Record.UUID.
+5. Agent skips renderer and apply.
+6. Agent publishes already_in_sync status and success result.
 ```
 
 ### UC-03: NAT rule removed from desired config
@@ -1288,12 +1278,12 @@ Flow:
 
 ```text
 1. VyOS boots with saved bootstrap/recovery config.
-2. Temporary apply state is absent.
+2. Temporary applied UUID state is absent.
 3. Agent connects to NATS using bootstrap connectivity.
 4. Agent loads latest desired config from KV.
 5. Renderer renders latest desired payload.
 6. Apply engine applies and commits runtime config.
-7. Temporary state is written after success.
+7. Agent writes temporary applied UUID state after render/apply success.
 ```
 
 ### UC-06: Render failure
@@ -1310,7 +1300,7 @@ Flow:
 1. Agent loads desired config.
 2. Renderer returns a typed render error.
 3. Agent does not call apply.
-4. Temporary state is not updated.
+4. Temporary applied UUID state is not updated.
 5. Agent publishes failure result with render_failed category.
 ```
 
@@ -1329,7 +1319,7 @@ Flow:
 2. Apply engine starts managed reset apply.
 3. Delete, set, or commit fails.
 4. Apply engine discards candidate config where possible.
-5. Temporary state is not updated.
+5. Temporary applied UUID state is not updated.
 6. Agent publishes failure result with apply_failed category.
 ```
 
@@ -1437,14 +1427,19 @@ Required:
 ```text
 - Plan rejects unsafe commands
 - Plan creates managed reset delete commands
-- Apply first config with no temporary state
-- Apply same UUID/hash returns Changed=false
+- Apply first config executes managed reset and commit
 - NAT removal is handled by managed reset
 - VLAN removal is handled by managed reset
 - unknown/protected paths are not deleted
-- DryRun does not execute and does not update state
-- commit failure does not update state
+- commit failure returns typed error and attempts discard
 - save disabled by default
+```
+
+NATS client integration acceptance (external to this repo):
+
+```text
+- VyOS NATS client skips render/apply when applied_uuid equals desired.Record.UUID
+- VyOS NATS client updates temporary applied UUID only after render and apply both succeed
 ```
 
 ### Integration tests
@@ -1476,7 +1471,6 @@ olg-renderer-vyos/
     parser.go
     policy.go
     planner.go
-    state.go
 
   internal/
     normalize/
@@ -1542,9 +1536,9 @@ Single-phase target:
 - Plan and Apply APIs
 - rendered set-command parser/validator
 - managed reset policy
-- temporary runtime state
 - fake executor tests
 - real executor boundary
+- no apply-owned temporary applied UUID state
 - no NATS integration inside this repo
 - no old-vs-new diff mode
 - no live config parsing
@@ -1580,8 +1574,6 @@ Apply acceptance:
 - unknown/protected config is preserved by default
 - commit-only is default
 - save is disabled by default
-- temporary state is updated only after success
-- failed apply does not update temporary state
 - no NATS/KV/result/status logic is added to this repo
 ```
 
@@ -1593,6 +1585,9 @@ NATS integration acceptance belongs to `olg-server-vyos-client-natagent`:
 - render failure publishes failure result and skips apply
 - apply failure publishes failure result and does not mark config applied
 - missed notification is recovered by startup reconcile
+- temporary applied UUID state is updated only after render and apply both succeed
+- failed render/apply does not update temporary applied UUID state
+- same UUID skips render/apply before renderer is called
 ```
 
 ---
@@ -1618,7 +1613,7 @@ Future apply work:
 
 ```text
 - configurable managed path policy loaded by caller
-- persistent apply state option
+- optional hooks for externally owned applied-state workflows
 - optional save-after-commit mode
 - commit-confirm support
 - old-vs-new diff apply mode
