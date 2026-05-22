@@ -4,6 +4,8 @@
 
 `olg-renderer-vyos` is the VyOS render/apply library used by `olg-server-vyos-client-natagent`.
 
+This document is implementation-oriented and authoritative for design/contracts. `README.md` is the high-level state/usage overview.
+
 The repository has two intended public responsibilities:
 
 ```text

@@ -16,6 +16,8 @@ OLG/uCentral JSON
 
 The repository must remain independent of NATS. `olg-server-vyos-client-natagent` owns NATS command handling, KV loading, result/status publishing, and orchestration.
 
+For detailed implementation contracts and acceptance requirements, see `SPEC.md`.
+
 ---
 
 ## Current State and Intended Direction
@@ -53,55 +55,19 @@ internal/vyos/
 
 ## Responsibility
 
-`olg-renderer-vyos` owns, or is intended to own after the apply engine is added:
-
-```text
-- OLG/uCentral JSON to VyOS set-command rendering
-- public renderer facade used by olg-server-vyos-client-natagent
-- schema/version compatibility checks for rendering
-- normalization into render-friendly data
-- deterministic command ordering
-- typed render errors
-- renderer fixtures and golden tests
-- public apply engine facade used by olg-server-vyos-client-natagent
-- validation of renderer-generated set commands before apply
-- cloud-authoritative reset-root apply planning for cloud-controlled reset roots
-- commit-only runtime apply by default
-- fake executor tests and real VyOS executor boundary
-```
-
-`olg-renderer-vyos` does not own:
-
-```text
-- NATS or JetStream connections
-- KV read/write
-- temporary applied UUID state persistence/comparison
-- configure/action handler registration
-- result/status publishing
-- cloud command envelopes
-- target command authorization over NATS
-- live device inventory discovery
-- runtime schema fetching
-- cloud/client-facing APIs
-```
-
-Package-level boundaries:
+High-level responsibility split:
 
 ```text
 renderer package:
-  must not apply commands, delete config, commit, save, discard, or know about NATS
+  converts OLG/uCentral desired config into deterministic VyOS set commands
 
 apply package:
-  must not render OLG/uCentral JSON and must not know about NATS subjects or KV
+  intended to validate rendered commands, prepare cloud-authoritative reset operations,
+  execute through a controlled VyOS executor, and commit
 
 olg-server-vyos-client-natagent:
-  loads desired config from KV
-  owns temporary applied UUID state for current boot optimization
-  compares desired UUID with applied UUID before renderer/apply
-  performs startup reconcile from KV
-  publishes already_in_sync/success when UUID matches
-  updates applied UUID only after renderer and apply both succeed
-  calls renderer, calls apply, and publishes results
+  owns NATS, KV loading, temporary applied UUID state, startup reconcile,
+  result/status publishing, and orchestration
 ```
 
 ---
@@ -132,16 +98,11 @@ olg-renderer-vyos
 ```text
 olg-server-vyos-client-natagent
   -> receive cmd.configure.vyos
-  -> LoadDesiredConfig(ctx, target)
+  -> load desired config from KV
   -> compare desired UUID with temporary applied UUID
   -> if same UUID: publish already_in_sync/success and skip render/apply
-  -> if different UUID: build renderer input metadata
-  -> call renderer.Render(...)
-  -> receive rendered VyOS set commands
-  -> call apply.Engine.Prepare(...) or apply.Engine.Apply(...)
-  -> if Apply is called: delete cloud-controlled reset roots
-  -> if Apply is called: apply rendered set commands
-  -> if Apply is called: commit once
+  -> if different UUID: call renderer.Render(...)
+  -> call apply.Engine.Apply(...)
   -> update temporary applied UUID after successful apply
   -> publish configure result/status
 ```
@@ -284,27 +245,8 @@ func (e *Engine) Apply(ctx context.Context, input Input) (Result, error)
 func GetInfo() Info
 ```
 
-Prepare is the non-executing pre-apply API.
-
-It validates renderer-generated set-command text and returns the deterministic cloud-authoritative reset plan that Apply would execute.
-
-Prepare must not touch VyOS. It must not call the executor, commit, save, discard, publish status, or update any state.
-
-Prepare exists for tests, debugging, safety review, and dry-run style inspection.
-
-The APIs should be atomic and unique:
-
-```text
-Prepare:
-  validate rendered commands and return planned delete/set operations only
-
-Apply:
-  validate, prepare, execute delete/set commands, commit, optionally save if enabled, and return execution result
-```
-
-Dry-run behavior is represented by Prepare, not by a DryRun field on Apply input.
-
-Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `ApplyRenderedText`, or `PreviewApply`.
+`Prepare` is the non-executing preview/planning API. `Apply` executes and commits.
+Detailed API contracts and behavior are defined in `SPEC.md`.
 
 ---
 
@@ -312,70 +254,10 @@ Avoid overlapping public methods such as `ApplyCommands`, `CommitCommands`, `App
 
 The initial apply mode is cloud-authoritative reset with protected roots.
 
-Cloud desired config is the production source of truth for cloud-controlled roots.
+At a high level, apply deletes explicit cloud-controlled reset roots, applies rendered set commands, and commits once.
+It must not delete the full VyOS config and does not save by default.
 
-```text
-cloud-authoritative reset with protected roots:
-  delete only explicit cloud-controlled reset roots
-  apply rendered set commands (if any)
-  commit once
-```
-
-The apply engine must not delete the full VyOS configuration.
-The apply engine should always apply the commands it is given unless validation, planning, execution, commit, or save fails.
-
-The real VyOS executor must execute validated delete/set command lists through a controlled VyOS configuration path. It must not run rendered command text through unsafe shell interpolation such as `sh -c "<command>"`.
-
-The apply package should pass structured delete/set command lists to the executor. The executor must not expose arbitrary shell command execution.
-
-For the renderer MVP, reset roots are:
-
-```text
-- interfaces bridge
-- nat source
-```
-
-The apply engine uses a reset policy to decide which roots are deleted before rendered commands are applied.
-Anything not listed as a reset root is preserved from broad deletion by default.
-Future renderer sections must deliberately add matching reset roots.
-
-Protected/default/bootstrap roots are not deleted by default:
-
-```text
-- system
-- service
-- interfaces ethernet
-- protocols
-- container
-- users
-- agent/bootstrap/recovery config
-- any root not explicitly listed as reset-owned
-```
-
-Protected roots are preserved from blind deletion because they may contain bootstrap, management, recovery, or device-default configuration.
-
-Preserved roots may still receive specific `set` commands from renderer output if required. Preservation only prevents broad delete operations.
-
-Empty rendered command text is valid.
-
-If the renderer returns no set commands, the apply engine should still delete the configured reset roots and commit. This removes all cloud-controlled config for currently supported sections while preserving protected/default/bootstrap config.
-
-For MVP, cloud owns the `nat source` tree. The apply engine may delete `nat source` before applying rendered source NAT rules.
-
-Because `nat source` is reset as a cloud-controlled root, a cloud-managed NAT rule ID range is not required for MVP.
-
-Manual/debug NAT source rules are not guaranteed to survive a cloud configure apply.
-
-Manual/debug configuration under any cloud-controlled reset root is not guaranteed to survive a cloud configure apply.
-
-Final runtime config after successful apply:
-
-```text
-preserved protected/default/bootstrap config
-  + rendered cloud desired config
-```
-
-If rendered command text is empty, the final runtime config after apply is only the preserved protected/default/bootstrap config.
+Detailed reset roots, protected roots, empty command behavior, executor safety, and acceptance criteria are defined in `SPEC.md`.
 
 ---
 
@@ -420,27 +302,9 @@ Recommended default path:
 /run/olg-vyos-client/applied-state.json
 ```
 
-It stores the latest desired config UUID that was successfully rendered and applied during the current boot.
+It stores the latest desired config UUID successfully rendered/applied during the current boot and is updated only after successful render+apply.
 
-Recommended state fields:
-
-```json
-{
-  "target": "vyos",
-  "applied_uuid": "cfg-123",
-  "applied_at": "2026-05-22T00:00:00Z"
-}
-```
-
-Rules:
-
-```text
-- state is updated only after renderer.Render and apply.Engine.Apply both succeed
-- state is not updated after render/apply/commit failure
-- state is temporary and may disappear after reboot
-- if state is missing after reboot, the agent re-applies latest desired config from KV
-- renderer and apply packages do not own this state
-```
+Detailed integration and state contracts are defined in `SPEC.md`.
 
 ---
 
@@ -520,9 +384,9 @@ func main() {
 Typical apply flow:
 
 ```text
-- create apply engine with executor and reset-root/protected-root policy
+- create apply engine with executor
 - pass renderer output into apply.Input, even if RenderedText is empty
-- call Prepare for validation/safety preview
+- optionally call Prepare for validation/safety preview
 - call Apply for real reset-root deletion and commit
 - publish result/status from the caller, not from the apply package
 ```
@@ -532,24 +396,8 @@ Example apply usage after implementation:
 ```go
 applier, err := apply.New(
   apply.WithExecutor(vyosExecutor),
-  apply.WithResetPolicy(apply.ResetPolicy{
-    ResetRoots: []string{
-      "interfaces bridge",
-      "nat source",
-    },
-  }),
   apply.WithSaveAfterCommit(false),
 )
-
-plan, err := applier.Prepare(ctx, apply.Input{
-  Target:          rendered.Target,
-  ConfigUUID:      rendered.ConfigUUID,
-  DesiredCommands: rendered.RenderedText,
-})
-if err != nil {
-  log.Fatal(err)
-}
-_ = plan
 
 result, err := applier.Apply(ctx, apply.Input{
   Target:          rendered.Target,
@@ -869,39 +717,11 @@ Add files only when real implementation requires them.
 
 ## Testing
 
-Renderer tests:
+Renderer tests include golden output comparison and deterministic rendering checks.
 
-```text
-- valid interface rendering
-- valid VLAN rendering
-- valid explicit NAT rendering
-- NAT absent behavior
-- invalid JSON
-- unsupported target
-- unsupported schema name
-- unsupported schema version
-- metadata mismatch
-- deterministic output
-```
+Apply tests cover Prepare planning, command validation, reset-root deletion, executor ordering, commit failure behavior, empty `DesiredCommands` behavior, and save-disabled default.
 
-Apply tests:
-
-```text
-- first apply executes cloud-authoritative reset with protected roots and commit
-- Prepare includes `delete interfaces bridge`
-- Prepare includes `delete nat source`
-- Prepare does not include delete commands for protected roots
-- Prepare allows set commands under preserved roots when emitted by renderer
-- empty DesiredCommands deletes reset roots and commits with no set commands
-- Apply sends delete commands before set commands
-- Apply performs delete + set + commit in one candidate session
-- NAT rule removal is handled by deleting `nat source`
-- invalid rendered command is rejected
-- Prepare validates rendered commands and returns a deterministic reset-root delete/set plan
-- Prepare does not execute, commit, save, discard, or update state
-- commit failure returns typed error and attempts discard
-- save is disabled by default
-```
+Detailed test matrix and acceptance criteria are defined in `SPEC.md`.
 
 NATS client integration responsibility:
 
@@ -930,30 +750,38 @@ go test -run TestPublicClientRenderFullMVPFlow -v ./renderer
 Future renderer work may include:
 
 ```text
-- DHCP set-command rendering
-- DNS set-command rendering
-- firewall set-command rendering
-- routing set-command rendering
-- system set-command rendering
-- service set-command rendering
-- PKI set-command rendering
-- multiple schema versions
-- schema fixture validation in CI
-- VyOS schema command-path validation
+- DHCP, DNS, firewall, routing, service, system, and PKI rendering
+- multiple schema versions and stronger schema validation in CI
 ```
 
 Future apply work may include:
 
 ```text
-- configurable reset roots
-- configurable protected roots
-- optional baseline set commands if required later
-- optional hooks for externally owned applied-state workflows
-- optional save-after-commit mode
+- configurable reset/protected roots
 - commit-confirm support
-- live config drift inspection
-- old-vs-new diff mode
-- VyOS schema validation for generated command paths
+- optional save-after-commit mode
+- live drift inspection
+- old-vs-new diff mode if required
+```
+
+---
+
+## Detailed Design
+
+The full implementation specification is in `SPEC.md`.
+
+`SPEC.md` defines:
+
+```text
+- renderer contracts
+- apply API contracts
+- reset policy
+- protected roots
+- empty DesiredCommands behavior
+- executor safety rules
+- VyOS NATS client integration contract
+- use cases
+- testing and acceptance criteria
 ```
 
 ---
