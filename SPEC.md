@@ -330,6 +330,16 @@ show
 
 The renderer describes desired configuration only. Delete, apply, commit, save, discard, and device execution are handled by the apply package.
 
+Renderer empty-output rule:
+
+```text
+- For the configure path, successful render output must be non-empty.
+- The renderer must reject empty or non-operational desired config rather than returning empty RenderedText.
+- If supported sections are present but invalid, malformed, incomplete, or cannot be rendered, renderer must return a typed render error rather than empty RenderedText.
+- If desired config contains no renderable production config for the current renderer scope, renderer must return a typed error such as missing_config or invalid_input.
+- For the VyOS configure MVP, successful render should require at least one renderable upstream interface.
+```
+
 ---
 
 ## 8. Rendering Scope for MVP
@@ -805,8 +815,7 @@ Rule:
 
 ```text
 ConfigUUID is metadata for traceability/result context only. The apply package must not use ConfigUUID for duplicate detection.
-DesiredCommands may be empty.
-An empty DesiredCommands value means there are no rendered cloud set commands for currently supported renderer sections. It does not mean the apply operation should be skipped.
+DesiredCommands is required and must be non-empty for the configure apply path.
 ```
 
 Expected public result shape:
@@ -859,9 +868,7 @@ Prepare must:
 - return a deterministic Plan
 ```
 
-Prepare must accept empty DesiredCommands when Target and ConfigUUID are valid.
-
-For empty DesiredCommands, Prepare must still build a reset-root delete plan and return an empty SetCommands list.
+Prepare must reject empty DesiredCommands.
 
 Example plan:
 
@@ -871,7 +878,7 @@ DeleteCommands:
   delete nat source
 
 SetCommands:
-  <empty>
+  <renderer output>
 
 Commit:
   true
@@ -910,17 +917,7 @@ Apply must:
 - return structured Result
 ```
 
-Apply must accept empty DesiredCommands when metadata is valid.
-
-For empty DesiredCommands, Apply must:
-
-```text
-- enter one candidate configuration session
-- delete reset roots
-- apply no rendered set commands
-- commit once
-- save only if explicitly enabled
-```
+Apply must reject empty DesiredCommands.
 
 Apply must not:
 
@@ -934,8 +931,6 @@ Apply must not:
 ### Plan shape
 
 Plan is data, not an executing operation.
-
-For empty DesiredCommands, `SetCommands` is an empty list and `DeleteCommands` still contains reset-root deletes.
 
 Recommended shape:
 
@@ -990,6 +985,8 @@ The MVP must not implement old-vs-new diff logic.
 The MVP must not delete the full VyOS config.
 
 The MVP must not rely on NAT rule ID range ownership because `nat source` is reset as a cloud-controlled root.
+
+Empty configure payload must not be used as reset-to-default. Reset-to-default or clear-cloud-config behavior must be a separate explicit action with its own authorization and safety policy.
 
 Rationale:
 
@@ -1063,12 +1060,18 @@ Rules:
 ```text
 - Delete only reset roots.
 - ResetRoots are explicit.
+- ResetPolicy roots must be validated against an apply package reset-root allowlist.
 - Never delete the full config.
 - Anything not listed in ResetRoots is preserved from broad deletion by default.
 - Manual/debug config under a reset root may be removed by cloud apply.
 - Preserved roots may still receive specific rendered set commands.
 - Future renderer sections must add matching reset roots explicitly.
 - WithResetPolicy replaces the default reset policy for that engine instance.
+- Every root supplied to WithResetPolicy must be validated.
+- An empty reset root must be rejected.
+- A root representing full config or `/` must be rejected.
+- Unsafe protected roots must be rejected even if passed through WithResetPolicy.
+- For MVP, reset roots outside the allowed reset-root list must be rejected.
 ```
 
 For MVP, `nat source` is a cloud-controlled reset root.
@@ -1077,9 +1080,33 @@ Apply may delete `nat source` before applying rendered source NAT rules.
 
 Therefore, a reserved cloud-managed NAT rule ID range is not required for MVP.
 
+For MVP, allowed reset roots are exactly:
+
+```text
+interfaces bridge
+nat source
+```
+
+For MVP, these reset roots must be rejected:
+
+```text
+system
+service
+users
+protocols
+container
+interfaces ethernet
+interfaces
+nat
+<empty>
+/
+```
+
 Manual/debug NAT source rules are not guaranteed to survive cloud apply.
 
 Future versions may add `ProtectedRoots` if explicit preservation documentation or validation becomes useful, but MVP preservation is defined by omission from `ResetRoots`.
+
+Invalid ResetPolicy should cause `apply.New(...)` to return an error when `WithResetPolicy` is applied.
 
 ---
 
@@ -1087,11 +1114,25 @@ Future versions may add `ProtectedRoots` if explicit preservation documentation 
 
 Apply input must be renderer-generated set-command text.
 
-Allowed command form:
+Validation must be line-based and quote-aware.
+
+Validation must:
 
 ```text
-set ...
+- normalize CRLF to LF before parsing
+- split DesiredCommands into lines
+- trim leading/trailing whitespace per line
+- ignore empty lines
+- reject comment lines because renderer output must not contain comments
+- parse non-empty lines using quote-aware tokenization
+- reject unclosed quotes
+- require the first token to be `set`
+- reject non-set operations
+- reject forbidden shell/control metacharacters
+- reject validation failures before executor invocation
 ```
+
+Renderer output must not contain comments. Comment lines in DesiredCommands must be rejected, not ignored.
 
 Reject these command roots or operations:
 
@@ -1107,7 +1148,7 @@ run
 sudo
 ```
 
-Reject shell execution hazards in rendered commands:
+Reject shell/control hazards in rendered commands:
 
 ```text
 ;
@@ -1119,21 +1160,28 @@ $
 <
 ```
 
+MVP command path allowlist:
+
+```text
+set interfaces bridge ...
+set interfaces ethernet <name> description ...
+set nat source ...
+```
+
+Rules:
+
+```text
+- `set interfaces bridge ...` is allowed because `interfaces bridge` is a cloud-controlled reset root.
+- `set nat source ...` is allowed because `nat source` is a cloud-controlled reset root.
+- `set interfaces ethernet <name> description ...` is allowed because renderer may set ethernet descriptions while `interfaces ethernet` is preserved from broad deletion.
+- Other `set ...` roots must be rejected until explicitly supported by renderer/apply policy.
+```
+
+The apply engine must not reject a valid renderer-emitted set command only because its root is preserved from broad deletion, but preserved-root set paths must still be explicitly allowlisted.
+
 The apply engine should not expose a generic arbitrary command execution API.
 
 Validation errors must happen before executor invocation.
-
-Rendered set commands may target preserved roots if the renderer intentionally emits specific leaf updates.
-
-Example:
-
-```text
-interfaces ethernet is preserved from broad delete.
-This still allows:
-  set interfaces ethernet eth0 description 'WAN'
-```
-
-The apply engine must not reject a `set` command only because its root is preserved from deletion.
 
 ---
 
@@ -1241,7 +1289,9 @@ Executor safety requirements:
 - The executor should receive structured command lists from Plan:
   - DeleteCommands
   - SetCommands
+- The executor must not receive one concatenated arbitrary shell command string.
 - The executor must not expose a generic arbitrary command execution API.
+- Validation must complete before executor invocation.
 ```
 
 If a shell wrapper is unavoidable for the target VyOS environment, it must only receive commands that passed apply validation, must preserve command boundaries, must not allow arbitrary command injection, and must be covered by tests for command rejection and command ordering.
@@ -1264,21 +1314,22 @@ Unit tests must not require real VyOS.
 
 ## 25. Apply Flow
 
-Prepare performs steps 1-4 only and returns Plan.
+Prepare performs steps 1-5 only and returns Plan.
 
-Apply performs steps 1-10:
+Apply performs steps 1-11:
 
 ```text
 1. Validate input metadata.
-2. Parse DesiredCommands into command lines. Empty command list is valid.
-3. Reject unsafe or non-set commands if any command lines are present.
-4. Build reset-root delete plan.
-5. Enter one VyOS candidate configuration session.
-6. Delete reset roots.
-7. Apply rendered set commands if any exist.
-8. Commit once.
-9. Save only if explicitly enabled.
-10. Return Result.
+2. Reject empty DesiredCommands.
+3. Parse DesiredCommands into command lines; parsed command list must be non-empty.
+4. Reject unsafe or non-set commands.
+5. Build reset-root delete plan.
+6. Enter one VyOS candidate configuration session.
+7. Delete reset roots.
+8. Apply rendered set commands.
+9. Commit once.
+10. Save only if explicitly enabled.
+11. Return Result.
 ```
 
 Delete + set + commit must be one transaction.
@@ -1303,6 +1354,7 @@ Required categories:
 
 ```text
 invalid_input
+empty_desired_commands
 invalid_command
 plan_failed
 executor_failed
@@ -1316,9 +1368,7 @@ apply_failed
 
 The agent may map apply errors to a wire error code such as `apply_failed`, while preserving the typed apply error internally for logs.
 
-Empty DesiredCommands is not an error by itself.
-
-Empty DesiredCommands must not produce `invalid_input`, `missing_config`, or `invalid_command` when required metadata is present.
+`empty_desired_commands` means apply received no rendered set commands for a configure apply operation.
 
 ---
 
@@ -1340,7 +1390,7 @@ Configure handler flow:
      skip renderer and apply
 8. Build renderer.Input.
 9. Call renderer.Render.
-10. Build apply.Input from renderer.Output.RenderedText.
+10. Build apply.Input from non-empty renderer.Output.RenderedText.
 11. Call apply.Engine.Apply.
 12. Update temporary applied UUID state only after render and apply both succeed.
 13. Publish success/failure result.
@@ -1349,6 +1399,9 @@ Configure handler flow:
 The apply package must not publish NATS messages.
 
 Applied UUID state ownership remains outside the renderer/apply packages.
+
+The VyOS NATS client must call apply only after renderer succeeds and returns non-empty RenderedText.
+If renderer returns empty output or a missing_config/invalid_input error, the agent must not call apply and must not update temporary applied UUID state.
 
 ---
 
@@ -1537,39 +1590,38 @@ Flow:
 5. Agent renders and applies if runtime state does not match.
 ```
 
-### UC-09: Cloud removes all currently supported config
+### UC-09: Empty desired config is rejected
 
 Goal:
 
 ```text
-Remove all cloud-controlled config for currently supported renderer sections.
+Prevent accidental destructive reset-root deletion from an empty configure payload.
 ```
 
 Input:
 
 ```text
-desired config has no renderable interfaces or NAT rules
+desired config has UUID but no renderable production config
 ```
 
 Renderer output:
 
 ```text
-empty RenderedText
+typed render error (for example missing_config or invalid_input)
 ```
 
 Apply behavior:
 
 ```text
-delete interfaces bridge
-delete nat source
-commit
+apply is not called
 ```
 
 Result:
 
 ```text
-protected/default/bootstrap config remains
-old bridge and NAT source config is removed
+reset roots are not deleted
+temporary applied UUID state is not updated
+agent publishes configure failure
 ```
 
 ---
@@ -1618,6 +1670,9 @@ Required:
 - optional payload metadata mismatch
 - interface normalization
 - NAT canonical field handling
+- renderer rejects empty desired config with UUID-only payload
+- renderer rejects desired config with no renderable upstream interface
+- renderer returns typed error (not empty RenderedText) for invalid supported sections
 - renderer error categories
 ```
 
@@ -1656,6 +1711,13 @@ full-mvp.set
 Required:
 
 ```text
+- command parser handles quoted values with spaces
+- command parser rejects unclosed quotes
+- command parser normalizes CRLF input
+- command parser handles blank lines and trailing spaces
+- comment lines are rejected
+- non-allowlisted set paths are rejected
+- executor is not called when command validation fails
 - Prepare rejects unsafe commands
 - Prepare returns deterministic reset-root delete/set plan
 - Prepare includes `delete interfaces bridge`
@@ -1663,21 +1725,24 @@ Required:
 - Prepare does not include delete commands for protected roots
 - Prepare uses DefaultResetPolicy when no override is provided
 - WithResetPolicy replaces the default reset policy
+- WithResetPolicy accepts allowed roots: `interfaces bridge`, `nat source`
+- WithResetPolicy rejects empty root
+- WithResetPolicy rejects full/root delete (`/`)
+- WithResetPolicy rejects `system`, `service`, `users`, `protocols`, `container`, `interfaces`, `interfaces ethernet`, and broad `nat`
+- invalid ResetPolicy causes `apply.New(...)` to return an error
 - Prepare allows set commands under preserved roots when emitted by renderer
-- Prepare with empty DesiredCommands returns reset-root delete commands and empty SetCommands
-- Empty DesiredCommands is not rejected when Target and ConfigUUID are valid
-- Prepare does not invoke executor
+- Prepare rejects empty DesiredCommands
+- Apply rejects empty DesiredCommands
+- empty DesiredCommands does not produce reset-root delete commands
+- empty DesiredCommands does not invoke executor
+- empty DesiredCommands does not commit
 - Apply invokes executor with the prepared plan
-- unsafe shell metacharacters are rejected before executor invocation
 - executor receives structured DeleteCommands and SetCommands, not one arbitrary shell command string
 - real executor implementation avoids unsafe shell interpolation
 - Apply sends delete commands before set commands
 - Apply performs delete + set + commit in one candidate session
-- Apply with empty DesiredCommands executes reset-root delete commands and commits
-- Empty DesiredCommands does not skip reset-root deletion
 - Apply commits through executor
 - Apply returns structured result
-- Apply first config executes cloud-authoritative reset with protected roots and commit
 - NAT rule removal is handled by deleting `nat source`
 - VLAN removal is handled by resetting `interfaces bridge`
 - protected roots are not deleted
@@ -1690,6 +1755,7 @@ NATS client integration acceptance (external to this repo):
 ```text
 - VyOS NATS client skips render/apply when applied_uuid equals desired.Record.UUID
 - VyOS NATS client updates temporary applied UUID only after render and apply both succeed
+- VyOS NATS client does not call apply when renderer fails or returns empty output
 ```
 
 ### Integration tests
@@ -1821,6 +1887,8 @@ Apply acceptance:
 - public Prepare API exists
 - ResetPolicy is documented
 - default reset roots are documented
+- command validation is line-based and quote-aware
+- command validation rejects comments, unclosed quotes, unsafe characters, and unsupported set paths
 - Prepare validates commands and returns deterministic reset-root plan
 - Prepare never invokes executor or changes device state
 - Apply uses the same preparation logic and executes through executor
@@ -1832,11 +1900,16 @@ Apply acceptance:
 - Prepare returns reset-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
 - Prepare generates delete commands from ResetPolicy
 - roots outside ResetPolicy are preserved from broad deletion
+- ResetPolicy roots are validated against the allowed reset-root list
+- unsafe reset roots are rejected
 - Prepare includes rendered set commands after delete commands
-- empty DesiredCommands is valid
-- empty DesiredCommands produces reset-root delete plan
-- Apply with empty DesiredCommands deletes reset roots and commits
-- empty DesiredCommands can remove all currently supported cloud-controlled config
+- empty DesiredCommands is rejected
+- empty DesiredCommands never deletes reset roots
+- empty DesiredCommands never invokes executor
+- successful renderer output for configure is non-empty
+- empty or non-operational desired config fails before apply
+- reset-to-default is not represented by empty configure payload
+- executor is not invoked when validation fails
 - Apply executes delete and set commands in one candidate session
 - Apply commits once
 - Apply does not delete full config
@@ -1890,8 +1963,10 @@ Future apply work:
 - optional save-after-commit mode
 - commit-confirm support
 - live config drift inspection
+- performance measurement for render/prepare/apply/commit/save latency on larger configs
 - old-vs-new diff mode if manual/local config preservation becomes a requirement
 - expanded reset roots for future rendered sections
+- explicit reset/default actions (for example `factory_reset`, `reset_to_bootstrap`, `clear_cloud_config`) with separate authorization and safety policy
 ```
 
 ---

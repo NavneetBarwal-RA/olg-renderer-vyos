@@ -385,7 +385,7 @@ Typical apply flow:
 
 ```text
 - create apply engine with executor
-- pass renderer output into apply.Input, even if RenderedText is empty
+- pass non-empty renderer output into apply.Input
 - optionally call Prepare for validation/safety preview
 - call Apply for real reset-root deletion and commit
 - publish result/status from the caller, not from the apply package
@@ -405,6 +405,9 @@ result, err := applier.Apply(ctx, apply.Input{
   DesiredCommands: rendered.RenderedText,
 })
 ```
+
+Empty desired config is not a valid configure input. The renderer must not produce empty `RenderedText` for a successful configure render, and the apply package must reject empty `DesiredCommands`.
+Reset/default behavior should be implemented as a separate explicit action, not by sending an empty configure payload.
 
 ---
 
@@ -719,7 +722,7 @@ Add files only when real implementation requires them.
 
 Renderer tests include golden output comparison and deterministic rendering checks.
 
-Apply tests cover Prepare planning, command validation, reset-root deletion, executor ordering, commit failure behavior, empty `DesiredCommands` behavior, and save-disabled default.
+Apply tests cover Prepare planning, command validation, rejection of empty `DesiredCommands`, reset-root deletion for valid rendered commands, executor ordering, commit failure behavior, and save-disabled default.
 
 Detailed test matrix and acceptance criteria are defined in `SPEC.md`.
 
@@ -777,7 +780,7 @@ The full implementation specification is in `SPEC.md`.
 - apply API contracts
 - reset policy
 - protected roots
-- empty DesiredCommands behavior
+- empty DesiredCommands rejection behavior
 - executor safety rules
 - VyOS NATS client integration contract
 - use cases
