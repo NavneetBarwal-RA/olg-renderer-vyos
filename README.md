@@ -232,7 +232,7 @@ The public `apply` package safely applies renderer-generated VyOS `set` commands
 | `(*Engine).Apply(ctx, input)` | Validates, plans, executes through an executor, and commits. |
 | `apply.GetInfo()` | Returns package metadata and defaults. |
 | `(*Engine).Info()` | Returns the same metadata from an engine instance. |
-| `apply.WithExecutor(exec)` | Overrides the default executor for tests or advanced callers. |
+| `apply.WithExecutor(exec)` | Overrides the default executor for tests or advanced controlled integrations. |
 | `apply.WithSaveAfterCommit(enabled)` | Controls optional save after commit. |
 | `apply.WithResetPolicy(policy)` | Replaces the reset policy after validating every root. |
 
@@ -317,9 +317,11 @@ type Executor interface {
 }
 ```
 
-The default executor uses the internal VyOS runner, which invokes `cli-shell-api` with one argument vector per configure operation. It enters configure mode, runs delete commands in order, runs set commands in order, commits once, and saves only when `WithSaveAfterCommit(true)` is configured.
+The default executor uses the internal VyOS runner, which invokes `/usr/bin/cli-shell-api` with one argument vector per configure operation. It enters configure mode, runs delete commands in order, runs set commands in order, commits once, and saves only when `WithSaveAfterCommit(true)` is configured.
 
-The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced overrides.
+The default executor assumes those `cli-shell-api` invocations participate in the intended VyOS candidate configuration transaction on the target image. That session behavior must be validated on the deployed VyOS version before production rollout.
+
+The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced controlled integrations. Custom executors receive already validated `Plan` data from `Apply`, but they can bypass runtime execution safety if implemented incorrectly, so they must not execute concatenated shell strings or expose arbitrary command execution.
 
 The apply package intentionally does not expose generic raw APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`. Separate operational action APIs for showconfig, show, save, or discard can be added later if needed, but they are not part of configure apply.
 

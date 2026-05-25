@@ -1010,7 +1010,9 @@ configure
 
 Do not commit after delete and before set.
 
-`apply.New()` constructs an engine with the default VyOS CLI-shell executor. `WithExecutor(...)` remains available for tests and advanced overrides, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
+`apply.New()` constructs an engine with the default VyOS CLI-shell executor. `WithExecutor(...)` remains available for tests and advanced controlled integrations, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
+
+The default executor assumes `cli-shell-api` invocations participate in the intended VyOS candidate configuration transaction on the target image. This transaction/session behavior must be validated on the deployed VyOS version or image before production rollout.
 
 ---
 
@@ -1309,7 +1311,11 @@ apply.New()
   -> cli-shell-api configure/delete/set/commit/save/discard operations
 ```
 
-The default runner invokes `cli-shell-api` once per operation using an argv boundary. It must not use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
+The default runner invokes `/usr/bin/cli-shell-api` once per operation using an argv boundary. It must not rely on PATH lookup, use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
+
+`internal/vyos.RunConfigCommand` is not a generic command runner. It must only receive commands from a validated `apply.Plan`, and it includes last-resort guards that reject empty commands, newlines, obvious shell/control metacharacters, and operations other than `set` or `delete`.
+
+`WithExecutor(...)` is for tests and advanced controlled integrations. Custom executors receive validated `Plan` data, but can bypass runtime execution safety if implemented incorrectly; they must preserve command boundaries and must not expose arbitrary command execution.
 
 Failure behavior:
 

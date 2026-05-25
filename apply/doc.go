@@ -17,6 +17,11 @@
 // traceability metadata only; the package never uses it for duplicate detection
 // or applied-state comparison.
 //
+// WithExecutor is available for tests and advanced controlled integrations, but
+// custom executors can bypass runtime execution safety if implemented
+// incorrectly. Normal production callers should use New without overriding the
+// executor.
+//
 // This package does not render OLG/uCentral JSON, connect to NATS, read or write
 // JetStream KV, publish result or status messages, own applied UUID state, or
 // expose arbitrary shell execution. Those responsibilities belong to the caller,

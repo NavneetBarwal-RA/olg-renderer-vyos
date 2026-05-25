@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"unicode"
 )
 
-const defaultCLIShellAPI = "cli-shell-api"
+const (
+	defaultCLIShellAPI       = "/usr/bin/cli-shell-api"
+	forbiddenConfigCmdChars  = ";|&`$><"
+	defaultCLIShellAPIDocRef = "cli-shell-api"
+)
 
 // Runner is the domain-specific VyOS configuration command boundary.
 type Runner interface {
@@ -32,12 +37,17 @@ func (r osCommandRunner) Run(ctx context.Context, name string, args ...string) (
 }
 
 // CLIShellRunner invokes VyOS cli-shell-api with one argument vector per operation.
+//
+// It is intentionally domain-specific: RunConfigCommand must only receive
+// delete/set commands from a validated apply.Plan. The defensive checks here are
+// last-resort guardrails for internal misuse, not a replacement for apply input
+// validation.
 type CLIShellRunner struct {
 	binary string
 	runner commandRunner
 }
 
-// NewCLIShellRunner returns a runner using the standard VyOS cli-shell-api path lookup.
+// NewCLIShellRunner returns a runner using the absolute VyOS cli-shell-api path.
 func NewCLIShellRunner() *CLIShellRunner {
 	return &CLIShellRunner{
 		binary: defaultCLIShellAPI,
@@ -86,17 +96,31 @@ func (r *CLIShellRunner) run(ctx context.Context, args ...string) (string, error
 	if binary == "" {
 		binary = defaultCLIShellAPI
 	}
+	if !filepath.IsAbs(binary) {
+		return "", fmt.Errorf("%s path must be absolute", defaultCLIShellAPIDocRef)
+	}
 	return r.runner.Run(ctx, binary, args...)
 }
 
 func splitCLICommand(command string) ([]string, error) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return nil, fmt.Errorf("command must not be empty")
+	}
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return nil, fmt.Errorf("command must not contain newlines")
+	}
+	if strings.ContainsAny(trimmed, forbiddenConfigCmdChars) {
+		return nil, fmt.Errorf("command contains forbidden character")
+	}
+
 	var tokens []string
 	var current strings.Builder
 	inSingle := false
 	inDouble := false
 	tokenStarted := false
 
-	for _, r := range strings.TrimSpace(command) {
+	for _, r := range trimmed {
 		switch {
 		case r == '\'' && !inDouble:
 			inSingle = !inSingle
@@ -122,8 +146,8 @@ func splitCLICommand(command string) ([]string, error) {
 	if tokenStarted {
 		tokens = append(tokens, current.String())
 	}
-	if len(tokens) == 0 {
-		return nil, fmt.Errorf("command must not be empty")
+	if tokens[0] != "set" && tokens[0] != "delete" {
+		return nil, fmt.Errorf("command operation %q is not allowed", tokens[0])
 	}
 	return tokens, nil
 }

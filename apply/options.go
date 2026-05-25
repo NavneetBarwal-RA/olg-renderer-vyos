@@ -3,7 +3,14 @@ package apply
 // Option mutates apply engine construction behavior.
 type Option func(*Engine) error
 
-// WithExecutor configures the executor used by Apply.
+// WithExecutor overrides the default executor used by Apply.
+//
+// Normal production callers should use New without this option so Apply uses
+// the controlled internal VyOS executor. WithExecutor is intended for tests and
+// advanced controlled integrations. Custom executors receive validated Plan
+// data, but can bypass runtime execution safety if implemented incorrectly; they
+// must not execute concatenated shell strings or expose arbitrary command
+// execution.
 func WithExecutor(exec Executor) Option {
 	return func(e *Engine) error {
 		if exec == nil {
