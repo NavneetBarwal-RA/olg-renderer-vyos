@@ -195,28 +195,19 @@ func TestApplySaveEnabledByOption(t *testing.T) {
 /*
 TC-APPLY-ENGINE-007
 Type: Negative
-Title: Missing executor
+Title: Nil executor option
 Summary:
-Calls Apply on a valid plan without configuring an executor.
-The engine should fail safely with a typed executor error and partial result.
+Attempts to override the default executor with nil.
+The constructor should reject nil executors before an engine is returned.
 
 Validates:
-  - Missing executor returns executor_failed
-  - Apply does not panic
-  - Partial result includes planned commands
+  - WithExecutor(nil) is rejected
+  - Failure uses invalid_input
+  - Default executor cannot be removed with nil
 */
-func TestApplyReturnsTypedErrorWhenExecutorMissing(t *testing.T) {
-	engine, err := New()
-	assertNoApplyError(t, err)
-
-	result, err := engine.Apply(context.Background(), baseInput(sampleCommands()))
-	assertApplyCode(t, err, CodeExecutorFailed)
-	if result.Applied {
-		t.Fatalf("missing executor reported applied")
-	}
-	if len(result.DeleteCommands) == 0 || len(result.SetCommands) == 0 {
-		t.Fatalf("missing executor did not return partial plan result: %#v", result)
-	}
+func TestNewRejectsNilExecutorOverride(t *testing.T) {
+	_, err := New(WithExecutor(nil))
+	assertApplyCode(t, err, CodeInvalidInput)
 }
 
 /*
@@ -311,6 +302,27 @@ func TestApplyPreservesConfigUUIDWithoutDuplicateDetection(t *testing.T) {
 	}
 	if exec.calls != 2 {
 		t.Fatalf("expected duplicate UUID to execute twice, got %d calls", exec.calls)
+	}
+}
+
+/*
+TC-APPLY-ENGINE-011
+Type: Positive
+Title: New installs default executor
+Summary:
+Constructs an engine without options and inspects the configured backend.
+Normal production callers should be able to call Apply without supplying an executor.
+
+Validates:
+  - New configures a default executor
+  - The default executor is VyOS-backed
+  - WithExecutor is not required for construction
+*/
+func TestNewInstallsDefaultExecutor(t *testing.T) {
+	engine, err := New()
+	assertNoApplyError(t, err)
+	if _, ok := engine.executor.(*defaultExecutor); !ok {
+		t.Fatalf("expected default executor, got %T", engine.executor)
 	}
 }
 

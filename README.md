@@ -2,7 +2,7 @@
 
 `olg-renderer-vyos` is the VyOS configuration library for OLG/uCentral desired configuration.
 
-The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through a caller-provided executor using cloud-authoritative reset with protected roots.
+The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default VyOS CLI-shell executor using cloud-authoritative reset with protected roots.
 
 ```text
 OLG/uCentral JSON
@@ -29,7 +29,7 @@ renderer:
   OLG/uCentral JSON -> VyOS CLI set-command text
 
 apply:
-  VyOS set-command text -> cloud-authoritative reset with protected roots -> executor -> commit
+  VyOS set-command text -> cloud-authoritative reset with protected roots -> default VyOS executor -> commit
 ```
 
 The renderer and apply engine should live in the same repository but remain separate public packages.
@@ -43,8 +43,8 @@ renderer/
 apply/
   public apply engine API
 
-caller-provided executor:
-  real VyOS command execution support outside this MVP package
+internal/vyos:
+  controlled VyOS cli-shell-api runner used by the default apply executor
 ```
 
 ---
@@ -58,8 +58,8 @@ renderer package:
   converts OLG/uCentral desired config into deterministic VyOS set commands
 
 apply package:
-  intended to validate rendered commands, prepare cloud-authoritative reset operations,
-  execute through a controlled VyOS executor, and commit
+  validates rendered commands, prepares cloud-authoritative reset operations,
+  executes through the default controlled VyOS executor, and commits
 
 olg-server-vyos-client-natagent:
   owns NATS, KV loading, temporary applied UUID state, startup reconcile,
@@ -221,7 +221,7 @@ The renderer describes the desired configuration only. Delete, apply, commit, sa
 
 ## Apply package
 
-The public `apply` package safely applies renderer-generated VyOS `set` commands using a cloud-authoritative reset model with protected roots. It validates the rendered command text, builds a deterministic reset plan, then executes that structured plan through a caller-provided executor.
+The public `apply` package safely applies renderer-generated VyOS `set` commands using a cloud-authoritative reset model with protected roots. It validates the rendered command text, builds a deterministic reset plan, then executes that structured plan through the default VyOS CLI-shell executor unless an advanced caller overrides the executor.
 
 ### Public API
 
@@ -232,7 +232,7 @@ The public `apply` package safely applies renderer-generated VyOS `set` commands
 | `(*Engine).Apply(ctx, input)` | Validates, plans, executes through an executor, and commits. |
 | `apply.GetInfo()` | Returns package metadata and defaults. |
 | `(*Engine).Info()` | Returns the same metadata from an engine instance. |
-| `apply.WithExecutor(exec)` | Configures the executor used by `Apply`. |
+| `apply.WithExecutor(exec)` | Overrides the default executor for tests or advanced callers. |
 | `apply.WithSaveAfterCommit(enabled)` | Controls optional save after commit. |
 | `apply.WithResetPolicy(policy)` | Replaces the reset policy after validating every root. |
 
@@ -259,6 +259,8 @@ Save
 
 `DeleteCommands` come from the reset policy. `SetCommands` are the validated renderer commands in input order. `Commit` is true for the configure apply path. `Save` is false by default and true only when `WithSaveAfterCommit(true)` is configured.
 
+`Apply` is the production execution API. Production callers normally call `apply.New()` and then `Apply()` directly; `Prepare()` is optional preview only and is not required before `Apply()`.
+
 `Apply` returns a `Result` with:
 
 ```text
@@ -273,7 +275,7 @@ SaveOutput
 DiscardOutput
 ```
 
-On executor failure, `Apply` returns the best partial result available with `Applied=false`.
+On delete, set, or commit failure, the default executor attempts `discard` and returns the best partial result available with `Applied=false`. If save fails after commit, `Applied=true`, `Saved=false`, and the error code is `save_failed`.
 
 ### Reset policy
 
@@ -307,7 +309,7 @@ Commands such as `commit`, `save`, `delete`, `show`, `set system ...`, `set serv
 
 ### Executor contract
 
-`Apply` uses this boundary:
+`Apply` uses this boundary internally:
 
 ```go
 type Executor interface {
@@ -315,11 +317,15 @@ type Executor interface {
 }
 ```
 
-The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. This MVP does not include a real VyOS executor. Unit and integration-style tests use fake executors.
+The default executor uses the internal VyOS runner, which invokes `cli-shell-api` with one argument vector per configure operation. It enters configure mode, runs delete commands in order, runs set commands in order, commits once, and saves only when `WithSaveAfterCommit(true)` is configured.
+
+The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced overrides.
+
+The apply package intentionally does not expose generic raw APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`. Separate operational action APIs for showconfig, show, save, or discard can be added later if needed, but they are not part of configure apply.
 
 ### NAT client integration
 
-`olg-server-vyos-client-natagent` should load desired config from KV, call `renderer.Render(...)`, verify `RenderedText` is non-empty, then call `apply.Engine.Apply(...)`.
+`olg-server-vyos-client-natagent` should load desired config from KV, call `renderer.Render(...)`, verify `RenderedText` is non-empty, then call `apply.Engine.Apply(...)`. The agent does not call or import executor internals separately.
 
 The NAT client owns KV loading, NATS command handling, applied UUID state, duplicate detection, startup reconcile, and result/status publishing.
 
@@ -338,17 +344,33 @@ plan, err := engine.Prepare(ctx, apply.Input{
 })
 ```
 
-Example `Apply` usage with a custom executor:
+Example end-to-end render and apply usage:
 
 ```go
-engine, err := apply.New(apply.WithExecutor(exec))
+rendererEngine, err := renderer.New()
 if err != nil {
     // handle error
 }
 
-result, err := engine.Apply(ctx, apply.Input{
+rendered, err := rendererEngine.Render(ctx, renderer.Input{
+    Target:        "vyos",
+    ConfigUUID:    "cfg-123",
+    SchemaName:    "olg-ucentral",
+    SchemaVersion: "4.2.0",
+    PayloadJSON:   payload,
+})
+if err != nil {
+    // handle error
+}
+
+applier, err := apply.New()
+if err != nil {
+    // handle error
+}
+
+result, err := applier.Apply(ctx, apply.Input{
     Target:          "vyos",
-    ConfigUUID:      "cfg-123",
+    ConfigUUID:      rendered.ConfigUUID,
     DesiredCommands: rendered.RenderedText,
 })
 ```
@@ -489,7 +511,7 @@ func main() {
 Typical apply flow:
 
 ```text
-- create apply engine with executor
+- create apply engine with apply.New()
 - pass non-empty renderer output into apply.Input
 - optionally call Prepare for validation/safety preview
 - call Apply for real reset-root deletion and commit
@@ -499,10 +521,10 @@ Typical apply flow:
 Example apply usage:
 
 ```go
-applier, err := apply.New(
-  apply.WithExecutor(vyosExecutor),
-  apply.WithSaveAfterCommit(false),
-)
+applier, err := apply.New()
+if err != nil {
+  log.Fatal(err)
+}
 
 result, err := applier.Apply(ctx, apply.Input{
   Target:          rendered.Target,

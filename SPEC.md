@@ -13,7 +13,7 @@ renderer:
   OLG/uCentral JSON -> deterministic VyOS CLI set commands
 
 apply:
-  deterministic VyOS CLI set commands -> cloud-authoritative reset with protected roots -> commit runtime config
+  deterministic VyOS CLI set commands -> cloud-authoritative reset with protected roots -> default VyOS executor -> commit runtime config
 ```
 
 The repository must remain independent of NATS. NATS command handling, JetStream KV access, and result/status publishing belong to `nats-agent-core` and `olg-server-vyos-client-natagent`.
@@ -54,6 +54,7 @@ The apply engine must be:
 - independent of NATS
 - testable without real VyOS
 - commit-only by default
+- directly executable through its default VyOS CLI-shell executor
 - able to remove stale cloud-owned config without old-vs-new diff logic
 - simple enough to implement as one coherent MVP change
 ```
@@ -140,7 +141,7 @@ internal/templates/
   renderer templates
 
 internal/vyos/
-  real VyOS executor implementation
+  controlled VyOS cli-shell runner used by the default apply executor
 ```
 
 The public packages should expose stable APIs. Internal packages can evolve as needed.
@@ -845,9 +846,10 @@ func WithResetPolicy(policy ResetPolicy) Option
 API rules:
 
 ```text
-- Prepare is the only non-executing apply-engine API.
-- Prepare returns what Apply would execute.
-- Apply executes the prepared operation and commits.
+- Prepare is optional preview and is the only non-executing apply-engine API.
+- Prepare returns what Apply would execute for the same input and policy.
+- Production callers may call Apply directly; they do not need to call Prepare first.
+- Apply validates, prepares a fresh plan, executes through the default executor unless overridden, and commits.
 - There is no DryRun field in Input.
 - Dry-run style inspection must use Prepare.
 - Avoid duplicate public apply APIs with overlapping meaning.
@@ -903,13 +905,13 @@ Prepare must not:
 
 ### Apply semantics
 
-Apply is the executing API.
+Apply is the production executing API.
 
 Apply must:
 
 ```text
 - perform the same validation and plan preparation as Prepare
-- execute delete and set commands through the configured executor
+- execute delete and set commands through the default VyOS executor unless WithExecutor overrides it
 - apply delete and set commands in one candidate configuration session
 - commit the candidate configuration
 - save only if explicitly enabled
@@ -1007,6 +1009,8 @@ configure
 ```
 
 Do not commit after delete and before set.
+
+`apply.New()` constructs an engine with the default VyOS CLI-shell executor. `WithExecutor(...)` remains available for tests and advanced overrides, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
 
 ---
 
@@ -1296,16 +1300,40 @@ Executor safety requirements:
 
 If a shell wrapper is unavoidable for the target VyOS environment, it must only receive commands that passed apply validation, must preserve command boundaries, must not allow arbitrary command injection, and must be covered by tests for command rejection and command ordering.
 
+Default executor:
+
+```text
+apply.New()
+  -> internal VyOS CLI-shell executor
+  -> internal/vyos runner
+  -> cli-shell-api configure/delete/set/commit/save/discard operations
+```
+
+The default runner invokes `cli-shell-api` once per operation using an argv boundary. It must not use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
+
+Failure behavior:
+
+```text
+- configure/session enter failure returns executor_failed
+- delete failure attempts discard and returns delete_failed
+- set failure attempts discard and returns set_failed
+- commit failure attempts discard and returns commit_failed
+- save failure after successful commit returns save_failed with Applied=true and Saved=false
+- discard failure must not hide the primary failure code
+- context cancellation stops execution and returns a typed executor_failed/apply_failed error
+```
+
 Testing executor:
 
 ```text
 fake executor records plan and simulates success/failure
+fake VyOS runner records default executor operations
 ```
 
 Real executor:
 
 ```text
-internal/vyos executor performs local non-interactive VyOS operations
+internal/vyos runner performs local non-interactive VyOS CLI-shell operations
 ```
 
 Unit tests must not require real VyOS.
@@ -1340,6 +1368,9 @@ Failure flow:
 
 ```text
 - discard candidate config where possible
+- discard is attempted for delete, set, and commit failures
+- primary errors such as delete_failed, set_failed, and commit_failed are preserved even if discard also fails
+- save failure after commit does not discard and keeps Applied=true
 - do not update any applied UUID state because that state is owned by the VyOS NATS client
 - return typed apply error
 ```
@@ -1748,6 +1779,12 @@ Required:
 - protected roots are not deleted
 - commit failure returns typed error and attempts discard
 - save disabled by default
+- apply.New installs the default VyOS CLI-shell executor
+- WithExecutor(fake) overrides the default executor for tests
+- default executor runs configure, deletes, sets, commit, and optional save in order
+- default executor attempts discard on delete, set, and commit failure
+- save failure after commit returns save_failed with Applied=true
+- GitHub Actions CI runs gofmt check, go test ./..., and go test -race ./...
 ```
 
 NATS client integration acceptance (external to this repo):

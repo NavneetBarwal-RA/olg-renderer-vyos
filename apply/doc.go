@@ -1,6 +1,6 @@
 // Package apply validates renderer-generated VyOS set commands, prepares a
 // deterministic cloud-authoritative reset plan with protected roots, and applies
-// that plan through a caller-provided executor.
+// that plan through the default VyOS executor unless a caller overrides it.
 //
 // The MVP reset strategy deletes only explicit cloud-controlled reset roots,
 // then applies the validated rendered set commands and commits once. The default
@@ -10,10 +10,12 @@
 // Specific preserved-root commands may still be allowlisted, such as renderer
 // emitted ethernet description commands.
 //
-// Prepare validates input and returns a non-executing Plan. Apply uses the same
-// preparation logic and then calls the configured Executor with structured delete
-// and set command slices. ConfigUUID is traceability metadata only; the package
-// never uses it for duplicate detection or applied-state comparison.
+// Prepare validates input and returns a non-executing Plan. Apply is the
+// production execution API: it uses the same preparation logic, calls the default
+// controlled VyOS CLI-shell executor with structured delete and set command
+// slices, commits once, and saves only when configured. ConfigUUID is
+// traceability metadata only; the package never uses it for duplicate detection
+// or applied-state comparison.
 //
 // This package does not render OLG/uCentral JSON, connect to NATS, read or write
 // JetStream KV, publish result or status messages, own applied UUID state, or

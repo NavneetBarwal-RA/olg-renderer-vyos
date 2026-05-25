@@ -24,6 +24,7 @@ func New(opts ...Option) (*Engine, error) {
 	}
 
 	e := &Engine{
+		executor:    newDefaultExecutor(),
 		resetPolicy: policy,
 	}
 	for _, opt := range opts {
@@ -71,16 +72,18 @@ func (e *Engine) Apply(ctx context.Context, input Input) (Result, error) {
 		return Result{}, err
 	}
 
-	baseResult := resultFromPlan(plan)
 	if e.executor == nil {
-		return baseResult, newError(CodeExecutorFailed, "executor is not configured", nil)
+		return resultFromPlan(plan), newError(CodeExecutorFailed, "executor is not configured", nil)
 	}
 
 	execResult, err := e.executor.Execute(ctx, clonePlan(plan))
 	result := resultFromExecution(plan, execResult)
 	if err != nil {
-		result.Applied = false
-		if CodeOf(err) != "" {
+		code := CodeOf(err)
+		if code != CodeSaveFailed {
+			result.Applied = false
+		}
+		if code != "" {
 			return result, err
 		}
 		return result, newError(CodeExecutorFailed, "executor failed", err)
