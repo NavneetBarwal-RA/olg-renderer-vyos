@@ -1812,6 +1812,56 @@ NATS client integration acceptance (external to this repo):
 
 Real VyOS tests can come later. MVP unit tests must use a fake executor.
 
+### Lab-only VyOS smoke test
+
+This repository includes a manual smoke command:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --save=false
+```
+
+Preview without applying:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --skip-apply
+```
+
+The command is lab-only and must not run in normal CI. It compiles during `go test ./...`, but real VyOS operations execute only when a user runs it manually with the explicit safety flag.
+
+The smoke command must use the public apply path:
+
+```text
+apply.New()
+  -> Prepare(ctx, input)
+  -> Apply(ctx, input)
+  -> default internal VyOS executor
+```
+
+It must not import `internal/vyos`, call executor internals, expose raw public `Run`/`Shell`/`Set`/`Commit`/`Save`/`Show` APIs, or add NATS/KV/result-publishing behavior.
+
+Expected output excerpt:
+
+```text
+[smoke] starting VyOS apply smoke test
+[smoke] checking required binaries
+[smoke] found /usr/bin/cli-shell-api
+[smoke] previewing plan with Prepare
+[smoke] plan delete_count=2 set_count=1 commit=true save=false
+[smoke] applying plan through Apply
+[smoke] result applied=true saved=false
+[smoke] completed successfully
+```
+
+Cleanup guidance:
+
+```text
+- The smoke command may delete interfaces bridge and nat source through normal apply policy.
+- Run only on a disposable/lab VyOS VM or router.
+- Restore with known-good desired config through the normal NATS agent path, a lab snapshot/backup, or console recovery.
+```
+
+Fake executor and fake runner tests remain required because a real smoke run validates only one image and cannot deterministically cover parser rejection, reset policy guards, command ordering, discard failure, save failure, teardown failure, context cancellation, or session env parser behavior.
+
 ---
 
 ## 31. Repository Layout

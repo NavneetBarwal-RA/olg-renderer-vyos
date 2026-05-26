@@ -1,0 +1,183 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/routerarchitects/olg-renderer-vyos/apply"
+)
+
+/*
+TC-VYOS-SMOKE-001
+Type: Mixed
+Title: Smoke command mode selection
+Summary:
+Builds smoke payload commands for supported modes and an unsupported mode.
+The helper must keep defaults small and reject unknown mode values before apply.
+
+Validates:
+  - minimal mode returns a bridge description command
+  - nat mode returns a NAT smoke command
+  - unsupported modes are rejected
+*/
+func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
+	tests := []struct {
+		mode string
+		want []string
+	}{
+		{mode: "minimal", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "bridge", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "nat", want: []string{"set nat source rule 9999 translation address masquerade"}},
+	}
+
+	for _, test := range tests {
+		got, err := buildSmokeCommands(test.mode)
+		if err != nil {
+			t.Fatalf("buildSmokeCommands(%q): %v", test.mode, err)
+		}
+		if !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("unexpected commands for %q:\n got: %#v\nwant: %#v", test.mode, got, test.want)
+		}
+	}
+
+	if _, err := buildSmokeCommands("system"); err == nil {
+		t.Fatalf("expected unsupported mode error")
+	}
+}
+
+/*
+TC-VYOS-SMOKE-002
+Type: Negative
+Title: Safety confirmation required
+Summary:
+Validates the confirmation helper used by the smoke command.
+The command must fail before constructing apply when the explicit flag is absent.
+
+Validates:
+  - Missing confirmation returns an error
+  - Present confirmation is accepted
+  - The helper is independent of real VyOS binaries
+*/
+func TestValidateConfirmationFlagRequiresExplicitOptIn(t *testing.T) {
+	if err := validateConfirmationFlag(false); err == nil {
+		t.Fatalf("expected missing confirmation to fail")
+	}
+	if err := validateConfirmationFlag(true); err != nil {
+		t.Fatalf("expected confirmation to pass: %v", err)
+	}
+}
+
+/*
+TC-VYOS-SMOKE-003
+Type: Mixed
+Title: Required binary checks use injected paths
+Summary:
+Creates temporary executable and non-executable files for binary validation.
+The test exercises file mode checks without requiring real VyOS paths on CI.
+
+Validates:
+  - Executable files pass
+  - Non-executable files fail
+  - Missing files fail
+*/
+func TestCheckRequiredBinariesUsesInjectedPaths(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "fake-cli-shell-api")
+	notExecutable := filepath.Join(dir, "fake-my_set")
+
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0644); err != nil {
+		t.Fatalf("write non-executable: %v", err)
+	}
+
+	if err := checkRequiredBinaries([]string{executable}); err != nil {
+		t.Fatalf("expected executable to pass: %v", err)
+	}
+	if err := checkRequiredBinaries([]string{notExecutable}); err == nil {
+		t.Fatalf("expected non-executable to fail")
+	}
+	if err := checkRequiredBinaries([]string{filepath.Join(dir, "missing")}); err == nil {
+		t.Fatalf("expected missing file to fail")
+	}
+}
+
+/*
+TC-VYOS-SMOKE-004
+Type: Positive
+Title: Plan log formatting
+Summary:
+Formats a prepared plan into smoke logs.
+The output should include counts and each delete/set command for manual review.
+
+Validates:
+  - Plan counts are logged
+  - Delete command entries are logged
+  - Set command entries are logged
+*/
+func TestLogPlanIncludesCountsAndCommands(t *testing.T) {
+	var out strings.Builder
+	plan := apply.Plan{
+		DeleteCommands: []string{"delete interfaces bridge", "delete nat source"},
+		SetCommands:    []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"},
+		Commit:         true,
+		Save:           false,
+	}
+
+	logPlan(&out, plan)
+	got := out.String()
+	for _, want := range []string{
+		"[smoke] plan delete_count=2 set_count=1 commit=true save=false",
+		"[smoke] delete[0]=delete interfaces bridge",
+		"[smoke] delete[1]=delete nat source",
+		"[smoke] set[0]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected log %q in:\n%s", want, got)
+		}
+	}
+}
+
+/*
+TC-VYOS-SMOKE-005
+Type: Positive
+Title: Skip apply previews without real binaries
+Summary:
+Runs the smoke command in preview-only mode with the safety flag present.
+The command should Prepare and print a plan without checking real VyOS binaries.
+
+Validates:
+  - skip-apply exits successfully
+  - Prepare plan details are logged
+  - Real binary checks are skipped
+*/
+func TestRunSkipApplyPreviewsWithoutRealBinaries(t *testing.T) {
+	var out strings.Builder
+	code := run([]string{
+		"--i-understand-this-modifies-vyos",
+		"--skip-apply",
+		"--mode", "minimal",
+	}, &out, func() time.Time {
+		return time.Date(2026, 5, 26, 1, 2, 3, 0, time.UTC)
+	})
+
+	if code != 0 {
+		t.Fatalf("unexpected exit code %d:\n%s", code, out.String())
+	}
+	got := out.String()
+	for _, want := range []string{
+		"[smoke] skip_apply=true; skipping required binary checks and Apply",
+		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z",
+		"[smoke] previewing plan with Prepare",
+		"[smoke] completed preview without Apply",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected log %q in:\n%s", want, got)
+		}
+	}
+}

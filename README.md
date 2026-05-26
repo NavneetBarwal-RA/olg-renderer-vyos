@@ -345,6 +345,37 @@ The NAT client owns KV loading, NATS command handling, applied UUID state, dupli
 
 Lab-only smoke test guidance for manual VyOS validation is documented in [docs/vyos-apply-smoke.md](docs/vyos-apply-smoke.md).
 
+### Lab-only VyOS smoke test
+
+The repository includes an opt-in manual smoke command for disposable/lab VyOS targets. It is not run by CI and it is not a replacement for the fake executor/fake runner unit tests.
+
+Preview without applying:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --skip-apply
+```
+
+Run on a lab VyOS VM/device:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --save=false
+```
+
+The command logs required binary checks, apply input, `Prepare` plan details, `Apply` result fields, errors, and cleanup guidance with a `[smoke]` prefix. Expected output includes:
+
+```text
+[smoke] starting VyOS apply smoke test
+[smoke] checking required binaries
+[smoke] found /usr/bin/cli-shell-api
+[smoke] previewing plan with Prepare
+[smoke] plan delete_count=2 set_count=1 commit=true save=false
+[smoke] applying plan through Apply
+[smoke] result applied=true saved=false
+[smoke] completed successfully
+```
+
+Warning: the normal apply policy may delete `interfaces bridge` and `nat source`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
+
 Example `Prepare` usage:
 
 ```go
