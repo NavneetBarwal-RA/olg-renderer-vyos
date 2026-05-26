@@ -1,10 +1,9 @@
 // Package vyos contains the controlled VyOS command runner used by the public
 // apply package's default executor.
 //
-// The package follows the documented VyOS CLI Shell API session model:
-// cli-shell-api getSessionEnv/setupSession/teardownSession plus my_delete,
-// my_set, my_commit, and my_discard for configuration mutation. It uses
-// absolute binary paths by default and assumes this model matches the deployed
+// The package follows the modern VyOS configuration wrapper model:
+// vyatta-cfg-cmd-wrapper begin/delete/set/commit/save/discard/end. It uses an
+// absolute wrapper path by default and assumes this model matches the deployed
 // VyOS image. Real target-image validation remains required before production
 // rollout.
 //

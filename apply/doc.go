@@ -1,23 +1,22 @@
 // Package apply validates renderer-generated VyOS set commands, prepares a
-// deterministic cloud-authoritative reset plan with protected roots, and applies
-// that plan through the default VyOS executor unless a caller overrides it.
+// deterministic managed-root reconciliation plan, and applies that plan through
+// the default VyOS executor unless a caller overrides it.
 //
-// The MVP reset strategy deletes only explicit cloud-controlled reset roots,
-// then applies the validated rendered set commands and commits once. The default
-// reset roots are "interfaces bridge" and "nat source". Roots such as system,
-// service, users, protocols, container, broad interfaces, and interfaces
-// ethernet are protected from broad deletion by omission from the reset policy.
-// Specific preserved-root commands may still be allowlisted, such as renderer
+// The MVP managed-root strategy deletes only explicit cloud-controlled managed
+// roots, then applies the validated rendered set commands and commits once. The
+// default managed roots are "interfaces bridge" and "nat source". Roots such as
+// system, service, users, protocols, container, broad interfaces, and interfaces
+// ethernet are preserved from broad deletion by omission from the reset policy.
+// Specific unmanaged-root commands may still be allowlisted, such as renderer
 // emitted ethernet description commands.
 //
 // Prepare validates input and returns a non-executing Plan. Apply is the
 // production execution API: it uses the same preparation logic, calls the default
 // controlled VyOS executor with structured delete and set command slices,
-// enters a documented VyOS session via cli-shell-api
-// getSessionEnv/setupSession/teardownSession, mutates config with
-// my_delete/my_set/my_commit/my_discard, and saves only when configured.
-// ConfigUUID is traceability metadata only; the package never uses it for
-// duplicate detection or applied-state comparison.
+// enters a VyOS configuration session with vyatta-cfg-cmd-wrapper begin/end,
+// mutates config through wrapper delete/set/commit/discard, and saves through
+// wrapper save only when configured. ConfigUUID is traceability metadata only;
+// the package never uses it for duplicate detection or applied-state comparison.
 //
 // WithExecutor is available for tests and advanced controlled integrations, but
 // custom executors can bypass runtime execution safety if implemented

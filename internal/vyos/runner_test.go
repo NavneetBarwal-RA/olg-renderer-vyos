@@ -14,17 +14,12 @@ type fakeCommandRunner struct {
 }
 
 type commandCall struct {
-	name       string
-	args       []string
-	sessionEnv map[string]string
+	name string
+	args []string
 }
 
-func (f *fakeCommandRunner) Run(ctx context.Context, sessionEnv map[string]string, name string, args ...string) (string, error) {
-	copiedEnv := make(map[string]string, len(sessionEnv))
-	for key, value := range sessionEnv {
-		copiedEnv[key] = value
-	}
-	call := commandCall{name: name, args: append([]string(nil), args...), sessionEnv: copiedEnv}
+func (f *fakeCommandRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	call := commandCall{name: name, args: append([]string(nil), args...)}
 	f.calls = append(f.calls, call)
 	key := name + " " + joinArgs(args)
 	if f.outputs != nil {
@@ -55,143 +50,80 @@ func joinArgs(args []string) string {
 }
 
 func newRunnerForTest(commandRunner commandRunner) *CLIShellRunner {
-	return newCLIShellRunnerForTest(
-		"/tmp/fake-cli-shell-api",
-		"/tmp/fake-my_set",
-		"/tmp/fake-my_delete",
-		"/tmp/fake-my_commit",
-		"/tmp/fake-my_discard",
-		"/tmp/fake-save-config",
-		commandRunner,
-	)
+	return newCLIShellRunnerForTest("/tmp/fake-vyatta-cfg-cmd-wrapper", commandRunner)
 }
 
 /*
 TC-VYOS-RUNNER-001
 Type: Positive
-Title: Absolute documented default binaries
+Title: Absolute default wrapper path
 Summary:
-Validates the production constructor defaults for all binaries used by the
-session-based runner. Paths must be absolute and match documented VyOS paths.
+Validates the production constructor default for the VyOS config command wrapper.
+The rolling VyOS path must be absolute and must not depend on a legacy save helper.
 
 Validates:
-  - Default cli-shell-api path is absolute
-  - Default my_set/my_delete/my_commit/my_discard paths are absolute
-  - Default save binary path is absolute and explicit
+  - Default wrapper path is absolute
+  - Default wrapper path is /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper
+  - No dedicated save binary is configured
 */
-func TestCLIShellRunnerUsesAbsoluteDocumentedDefaultPaths(t *testing.T) {
+func TestCLIShellRunnerUsesAbsoluteDefaultWrapperPath(t *testing.T) {
 	runner := NewCLIShellRunner()
 
-	if runner.cliShellAPI != "/usr/bin/cli-shell-api" {
-		t.Fatalf("unexpected cli-shell-api path: %q", runner.cliShellAPI)
+	if runner.configWrapper != "/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper" {
+		t.Fatalf("unexpected wrapper path: %q", runner.configWrapper)
 	}
-	if runner.mySet != "/opt/vyatta/sbin/my_set" {
-		t.Fatalf("unexpected my_set path: %q", runner.mySet)
-	}
-	if runner.myDelete != "/opt/vyatta/sbin/my_delete" {
-		t.Fatalf("unexpected my_delete path: %q", runner.myDelete)
-	}
-	if runner.myCommit != "/opt/vyatta/sbin/my_commit" {
-		t.Fatalf("unexpected my_commit path: %q", runner.myCommit)
-	}
-	if runner.myDiscard != "/opt/vyatta/sbin/my_discard" {
-		t.Fatalf("unexpected my_discard path: %q", runner.myDiscard)
-	}
-	if runner.saveConfig != "/opt/vyatta/sbin/vyatta-save-config.pl" {
-		t.Fatalf("unexpected save binary path: %q", runner.saveConfig)
-	}
-
-	for _, path := range []string{
-		runner.cliShellAPI,
-		runner.mySet,
-		runner.myDelete,
-		runner.myCommit,
-		runner.myDiscard,
-		runner.saveConfig,
-	} {
-		if !filepath.IsAbs(path) {
-			t.Fatalf("path is not absolute: %q", path)
-		}
-	}
-}
-
-/*
-TC-VYOS-SESSION-011
-Type: Positive
-Title: getSessionEnv parsing and invocation
-Summary:
-Executes getSessionEnv through the CLI shell binary and parses the returned
-assignments into a map used by later session calls.
-
-Validates:
-  - cli-shell-api getSessionEnv is invoked with provided session ID
-  - export and quoted values are parsed correctly
-  - Parsed env map can be consumed by setupSession
-*/
-func TestCLIShellRunnerGetSessionEnvParsesOutput(t *testing.T) {
-	commandRunner := &fakeCommandRunner{
-		outputs: map[string]string{
-			"/tmp/fake-cli-shell-api getSessionEnv session-011": "export VYATTA_CONFIG_SID='session-011'; COMMIT_VIA=\"api\"",
-		},
-	}
-	runner := newRunnerForTest(commandRunner)
-
-	sessionEnv, err := runner.GetSessionEnv(context.Background(), "session-011")
-	if err != nil {
-		t.Fatalf("get session env: %v", err)
-	}
-	wantEnv := map[string]string{
-		"VYATTA_CONFIG_SID": "session-011",
-		"COMMIT_VIA":        "api",
-	}
-	if !reflect.DeepEqual(sessionEnv, wantEnv) {
-		t.Fatalf("unexpected session env:\n got: %#v\nwant: %#v", sessionEnv, wantEnv)
-	}
-	if len(commandRunner.calls) != 1 {
-		t.Fatalf("unexpected call count: %#v", commandRunner.calls)
-	}
-	if commandRunner.calls[0].name != "/tmp/fake-cli-shell-api" ||
-		!reflect.DeepEqual(commandRunner.calls[0].args, []string{"getSessionEnv", "session-011"}) {
-		t.Fatalf("unexpected getSessionEnv call: %#v", commandRunner.calls[0])
+	if !filepath.IsAbs(runner.configWrapper) {
+		t.Fatalf("wrapper path is not absolute: %q", runner.configWrapper)
 	}
 }
 
 /*
 TC-VYOS-RUNNER-002
 Type: Positive
-Title: RunConfigCommand maps to my_set and my_delete
+Title: Wrapper command sequence
 Summary:
-Runs one set and one delete command through the runner.
-Leading operation tokens must be stripped before invoking my_* binaries.
+Runs begin, set, delete, commit, save, discard, and end through the runner.
+Every operation must use vyatta-cfg-cmd-wrapper with argv boundaries.
 
 Validates:
-  - set maps to my_set without leading set token
-  - delete maps to my_delete without leading delete token
-  - Quoted value with spaces is preserved as one argv element
+  - Begin maps to wrapper begin
+  - Set/delete keep operation tokens and argv boundaries
+  - Save maps to wrapper save
 */
-func TestRunConfigCommandMapsOperationsToMyBinaries(t *testing.T) {
+func TestCLIShellRunnerUsesWrapperForConfigCommands(t *testing.T) {
 	commandRunner := &fakeCommandRunner{}
 	runner := newRunnerForTest(commandRunner)
-	sessionEnv := map[string]string{"VYATTA_CONFIG_SID": "session-012"}
 
-	if _, err := runner.RunConfigCommand(context.Background(), sessionEnv, "set interfaces ethernet eth0 description 'WAN uplink'"); err != nil {
+	if _, err := runner.Begin(context.Background()); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := runner.RunConfigCommand(context.Background(), "set interfaces ethernet eth0 description 'WAN uplink'"); err != nil {
 		t.Fatalf("run set command: %v", err)
 	}
-	if _, err := runner.RunConfigCommand(context.Background(), sessionEnv, "delete interfaces bridge"); err != nil {
+	if _, err := runner.RunConfigCommand(context.Background(), "delete interfaces bridge"); err != nil {
 		t.Fatalf("run delete command: %v", err)
+	}
+	if _, err := runner.Commit(context.Background()); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := runner.Save(context.Background()); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := runner.Discard(context.Background()); err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+	if _, err := runner.End(context.Background()); err != nil {
+		t.Fatalf("end: %v", err)
 	}
 
 	want := []commandCall{
-		{
-			name:       "/tmp/fake-my_set",
-			args:       []string{"interfaces", "ethernet", "eth0", "description", "WAN uplink"},
-			sessionEnv: map[string]string{"VYATTA_CONFIG_SID": "session-012"},
-		},
-		{
-			name:       "/tmp/fake-my_delete",
-			args:       []string{"interfaces", "bridge"},
-			sessionEnv: map[string]string{"VYATTA_CONFIG_SID": "session-012"},
-		},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"begin"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"set", "interfaces", "ethernet", "eth0", "description", "WAN uplink"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"delete", "interfaces", "bridge"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"commit"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"save"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"discard"}},
+		{name: "/tmp/fake-vyatta-cfg-cmd-wrapper", args: []string{"end"}},
 	}
 	if !reflect.DeepEqual(commandRunner.calls, want) {
 		t.Fatalf("unexpected calls:\n got: %#v\nwant: %#v", commandRunner.calls, want)
@@ -224,38 +156,11 @@ func TestRunConfigCommandRejectsInvalidInputBeforeExecution(t *testing.T) {
 	for _, command := range tests {
 		commandRunner := &fakeCommandRunner{}
 		runner := newRunnerForTest(commandRunner)
-		if _, err := runner.RunConfigCommand(context.Background(), map[string]string{}, command); err == nil {
+		if _, err := runner.RunConfigCommand(context.Background(), command); err == nil {
 			t.Fatalf("expected command %q to be rejected", command)
 		}
 		if len(commandRunner.calls) != 0 {
 			t.Fatalf("unexpected command runner calls for %q: %#v", command, commandRunner.calls)
-		}
-	}
-}
-
-/*
-TC-VYOS-SESSION-012
-Type: Negative
-Title: Session env parser rejects malformed output
-Summary:
-Supplies malformed getSessionEnv assignment output to the parser.
-The parser must fail safely rather than guessing ambiguous assignments.
-
-Validates:
-  - Invalid shell keys are rejected
-  - Unclosed quoted values are rejected
-  - Missing assignment separator is rejected
-*/
-func TestParseSessionEnvRejectsMalformedOutput(t *testing.T) {
-	tests := []string{
-		"1INVALID=value",
-		"VYATTA_CONFIG_SID='unclosed",
-		"export ONLYKEY",
-	}
-
-	for _, output := range tests {
-		if _, err := parseSessionEnv(output); err == nil {
-			t.Fatalf("expected output to be rejected: %q", output)
 		}
 	}
 }

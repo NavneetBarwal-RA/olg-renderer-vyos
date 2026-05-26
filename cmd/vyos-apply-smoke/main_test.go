@@ -86,8 +86,8 @@ Validates:
 */
 func TestCheckRequiredBinariesUsesInjectedPaths(t *testing.T) {
 	dir := t.TempDir()
-	executable := filepath.Join(dir, "fake-cli-shell-api")
-	notExecutable := filepath.Join(dir, "fake-my_set")
+	executable := filepath.Join(dir, "fake-vyatta-cfg-cmd-wrapper")
+	notExecutable := filepath.Join(dir, "fake-not-executable")
 
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0755); err != nil {
 		t.Fatalf("write executable: %v", err)
@@ -104,6 +104,34 @@ func TestCheckRequiredBinariesUsesInjectedPaths(t *testing.T) {
 	}
 	if err := checkRequiredBinaries([]string{filepath.Join(dir, "missing")}); err == nil {
 		t.Fatalf("expected missing file to fail")
+	}
+}
+
+/*
+TC-VYOS-SMOKE-006
+Type: Positive
+Title: Required binaries use wrapper for save modes
+Summary:
+Builds the smoke binary list for save disabled and save enabled.
+Both modes should require only the modern generic config wrapper.
+
+Validates:
+  - save=false requires vyatta-cfg-cmd-wrapper
+  - save=true requires vyatta-cfg-cmd-wrapper
+  - No legacy save helper is required
+*/
+func TestRequiredBinariesForSmokeUsesWrapperForSaveModes(t *testing.T) {
+	for _, save := range []bool{false, true} {
+		got := requiredBinariesForSmoke(save)
+		want := []string{"/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("unexpected required binaries for save=%t:\n got: %#v\nwant: %#v", save, got, want)
+		}
+		for _, path := range got {
+			if strings.Contains(path, "vyatta-"+"save-config.pl") {
+				t.Fatalf("legacy save helper should not be required for save=%t: %#v", save, got)
+			}
+		}
 	}
 }
 

@@ -2,14 +2,14 @@
 
 `olg-renderer-vyos` is the VyOS configuration library for OLG/uCentral desired configuration.
 
-The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default VyOS CLI-shell executor using cloud-authoritative reset with protected roots.
+The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default VyOS wrapper executor using managed-root reconciliation.
 
 ```text
 OLG/uCentral JSON
   -> renderer
   -> deterministic VyOS set commands
   -> apply engine
-  -> cloud-authoritative reset of cloud-controlled roots
+  -> managed-root reconciliation
   -> set rendered desired config
   -> commit runtime config
 ```
@@ -29,7 +29,7 @@ renderer:
   OLG/uCentral JSON -> VyOS CLI set-command text
 
 apply:
-  VyOS set-command text -> cloud-authoritative reset with protected roots -> default VyOS executor -> commit
+  VyOS set-command text -> managed-root reconciliation -> default VyOS executor -> commit
 ```
 
 The renderer and apply engine should live in the same repository but remain separate public packages.
@@ -58,7 +58,7 @@ renderer package:
   converts OLG/uCentral desired config into deterministic VyOS set commands
 
 apply package:
-  validates rendered commands, prepares cloud-authoritative reset operations,
+  validates rendered commands, prepares managed-root reconciliation operations,
   executes through the default controlled VyOS executor, and commits
 
 olg-server-vyos-client-natagent:
@@ -221,7 +221,28 @@ The renderer describes the desired configuration only. Delete, apply, commit, sa
 
 ## Apply package
 
-The public `apply` package safely applies renderer-generated VyOS `set` commands using a cloud-authoritative reset model with protected roots. It validates the rendered command text, builds a deterministic reset plan, then executes that structured plan through the default internal VyOS session executor unless an advanced caller overrides the executor.
+The public `apply` package safely applies renderer-generated VyOS `set` commands using managed-root reconciliation. It validates the rendered command text, builds a deterministic plan that replaces only explicitly managed roots, then executes that structured plan through the default internal VyOS wrapper executor unless an advanced caller overrides the executor.
+
+Current default behavior:
+
+```text
+- explicit managed roots
+- delete managed roots
+- recreate desired config under managed roots
+- commit runtime config
+- save only if requested
+- preserve everything outside managed roots
+```
+
+Not current behavior:
+
+```text
+- whole-device reconciliation is not current behavior
+- delete everything except a preserve whitelist is not current behavior
+- dependency on vyatta-save-config.pl is not current behavior
+```
+
+Managed-root reconciliation is also managed-subtree replacement: if a root is managed, apply deletes that root and recreates the desired subtree under it. If a root is not managed, apply leaves it alone by default.
 
 ### Public API
 
@@ -242,7 +263,7 @@ The public `apply` package safely applies renderer-generated VyOS `set` commands
 
 `ConfigUUID` is metadata only. The apply package preserves it in `Plan` and `Result`, but it does not use it for duplicate detection or applied-state comparison.
 
-`DesiredCommands` must be non-empty renderer-generated VyOS CLI `set` command text. Empty desired commands are rejected and never produce reset-root delete commands. Empty configure payloads must not be used as reset-to-default.
+`DesiredCommands` must be non-empty renderer-generated VyOS CLI `set` command text. Empty desired commands are rejected and never produce managed-root delete commands. Empty configure payloads must not be used as reset-to-default.
 
 ### Plan and result
 
@@ -277,9 +298,13 @@ DiscardOutput
 
 On delete, set, or commit failure, the default executor attempts `discard` and returns the best partial result available with `Applied=false`. If save fails after commit, `Applied=true`, `Saved=false`, and the error code is `save_failed`.
 
-### Reset policy
+### Apply Ownership Model
 
-Default reset roots are:
+The renderer/apply engine does not own the whole VyOS device configuration. It owns only declared managed roots. During apply, it deletes those managed roots, recreates desired configuration under those roots, and preserves configuration outside managed roots by default.
+
+Absence of a config item from desired state deletes it only when that item is inside a managed root. Manual changes under a managed root are expected to be overwritten on the next apply; manual changes outside managed roots are preserved by default.
+
+Currently managed roots are defined by `apply.DefaultResetPolicy()` in [apply/policy.go](apply/policy.go):
 
 ```text
 interfaces bridge
@@ -293,7 +318,9 @@ delete interfaces bridge
 delete nat source
 ```
 
-Protected roots such as `system`, `service`, `users`, `protocols`, `container`, broad `interfaces`, broad `nat`, and `interfaces ethernet` are not broadly deleted. For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge` and `nat source`; all other roots are rejected.
+Unmanaged VyOS config must not be deleted by the default apply path, including `system login`, `system config-management`, `service ntp`, `interfaces loopback`, `interfaces ethernet` / WAN access, and other non-owned configuration. For this phase, whole-device reconciliation is not the design because an incomplete preserve list could delete SSH, login, WAN, NTP, or other system config. Full-device reconciliation, if ever added, must be a separate explicit mode with stronger safeguards.
+
+For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge` and `nat source`; all other roots are rejected.
 
 ### Command validation
 
@@ -317,19 +344,18 @@ type Executor interface {
 }
 ```
 
-The default executor uses the documented VyOS CLI Shell API session model:
+The default executor uses the modern VyOS configuration wrapper model:
 
 ```text
-/usr/bin/cli-shell-api getSessionEnv <session-id>
-/usr/bin/cli-shell-api setupSession
-/opt/vyatta/sbin/my_delete ...
-/opt/vyatta/sbin/my_set ...
-/opt/vyatta/sbin/my_commit
-optional /opt/vyatta/sbin/vyatta-save-config.pl when save is enabled
-/usr/bin/cli-shell-api teardownSession
+/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper begin
+/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper delete ...
+/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper set ...
+/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper commit
+optional /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper save when save is enabled
+/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end
 ```
 
-On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured.
+On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper discard` before returning the typed apply error. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
 
 The default executor assumes this session model matches the deployed VyOS image. Real VyOS validation in a lab or target image is still required before production rollout.
 
@@ -366,12 +392,21 @@ The command logs required binary checks, apply input, `Prepare` plan details, `A
 ```text
 [smoke] starting VyOS apply smoke test
 [smoke] checking required binaries
-[smoke] found /usr/bin/cli-shell-api
+[smoke] found /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper
 [smoke] previewing plan with Prepare
 [smoke] plan delete_count=2 set_count=1 commit=true save=false
 [smoke] applying plan through Apply
 [smoke] result applied=true saved=false
 [smoke] completed successfully
+```
+
+Smoke interpretation: the preview plan `delete interfaces bridge`, `delete nat source`, and `set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'` means apply will replace only the managed roots. Bridge config is managed and recreated, NAT source config is managed and recreated, and other VyOS config remains untouched unless it is under a managed root. Manually changing `interfaces bridge br0 description` is expected to be overwritten on the next smoke apply because `interfaces bridge` is managed.
+
+Verification commands for a lab VyOS VM:
+
+```bash
+show configuration commands | match "interfaces bridge"
+show configuration commands | match "OLG_APPLY_SMOKE_TEST"
 ```
 
 Warning: the normal apply policy may delete `interfaces bridge` and `nat source`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
@@ -426,12 +461,11 @@ result, err := applier.Apply(ctx, apply.Input{
 
 ## Apply Engine Behavior
 
-The initial apply mode is cloud-authoritative reset with protected roots.
+The initial apply mode is managed-root reconciliation.
 
-At a high level, apply deletes explicit cloud-controlled reset roots, applies rendered set commands, and commits once.
-It must not delete the full VyOS config and does not save by default.
+At a high level, apply deletes explicit managed roots, applies rendered set commands under those roots, and commits once. It must not delete the full VyOS config and does not save by default.
 
-Detailed reset roots, protected roots, empty command behavior, executor safety, and acceptance criteria are defined in `SPEC.md`.
+Detailed managed roots, empty command behavior, executor safety, and acceptance criteria are defined in `SPEC.md`.
 
 ---
 
@@ -462,7 +496,7 @@ Critical requirement:
 The saved bootstrap config must be sufficient for the agent to reconnect to NATS/KV after reboot.
 ```
 
-Saving after commit may be supported later as an explicit option, but it must not be the default MVP behavior.
+Saving after commit is available as an explicit option, but it is not the default behavior. `save=false` means runtime commit only. `save=true` persists configuration by running `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; the apply engine must not require `/opt/vyatta/sbin/vyatta-save-config.pl`.
 
 ---
 
@@ -561,7 +595,7 @@ Typical apply flow:
 - create apply engine with apply.New()
 - pass non-empty renderer output into apply.Input
 - optionally call Prepare for validation/safety preview
-- call Apply for real reset-root deletion and commit
+- call Apply for managed-root replacement and commit
 - publish result/status from the caller, not from the apply package
 ```
 
@@ -896,7 +930,7 @@ Add files only when real implementation requires them.
 
 Renderer tests include golden output comparison and deterministic rendering checks.
 
-Apply tests cover Prepare planning, command validation, rejection of empty `DesiredCommands`, reset-root deletion for valid rendered commands, executor ordering, commit failure behavior, and save-disabled default.
+Apply tests cover Prepare planning, command validation, rejection of empty `DesiredCommands`, managed-root deletion for valid rendered commands, executor ordering, commit failure behavior, and save-disabled default.
 
 Detailed test matrix and acceptance criteria are defined in `SPEC.md`.
 
@@ -934,7 +968,7 @@ Future renderer work may include:
 Future apply work may include:
 
 ```text
-- configurable reset/protected roots
+- configurable managed roots
 - commit-confirm support
 - optional save-after-commit mode
 - live drift inspection
@@ -952,8 +986,8 @@ The full implementation specification is in `SPEC.md`.
 ```text
 - renderer contracts
 - apply API contracts
-- reset policy
-- protected roots
+- managed-root policy
+- unmanaged configuration boundaries
 - empty DesiredCommands rejection behavior
 - executor safety rules
 - VyOS NATS client integration contract
@@ -984,7 +1018,7 @@ renderer:
   OLG/uCentral JSON -> VyOS set commands
 
 apply:
-  VyOS set commands -> cloud-authoritative reset with protected roots -> commit runtime config
+  VyOS set commands -> managed-root reconciliation -> commit runtime config
 
 vyos-nats-agent:
   NATS lifecycle, KV loading, renderer/apply orchestration, result publishing

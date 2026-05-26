@@ -16,12 +16,7 @@ import (
 const smokePrefix = "[smoke]"
 
 var defaultRequiredBinaries = []string{
-	"/usr/bin/cli-shell-api",
-	"/opt/vyatta/sbin/my_set",
-	"/opt/vyatta/sbin/my_delete",
-	"/opt/vyatta/sbin/my_commit",
-	"/opt/vyatta/sbin/my_discard",
-	"/opt/vyatta/sbin/vyatta-save-config.pl",
+	"/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper",
 }
 
 type smokeConfig struct {
@@ -56,12 +51,13 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 
 	if !cfg.skipApply {
 		logf(out, "checking required binaries")
-		if err := checkRequiredBinaries(defaultRequiredBinaries); err != nil {
+		requiredBinaries := requiredBinariesForSmoke(cfg.save)
+		if err := checkRequiredBinaries(requiredBinaries); err != nil {
 			logf(out, "binary check failed: %v", err)
 			logCleanupGuidance(out)
 			return 1
 		}
-		for _, path := range defaultRequiredBinaries {
+		for _, path := range requiredBinaries {
 			logf(out, "found %s", path)
 		}
 	} else {
@@ -128,6 +124,10 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 	logf(out, "completed successfully")
 	logCleanupGuidance(out)
 	return 0
+}
+
+func requiredBinariesForSmoke(save bool) []string {
+	return append([]string(nil), defaultRequiredBinaries...)
 }
 
 func parseFlags(args []string, out io.Writer, now func() time.Time) (smokeConfig, func(), error) {

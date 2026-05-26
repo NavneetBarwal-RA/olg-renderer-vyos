@@ -13,45 +13,27 @@ type fakeVyosRunner struct {
 	errors  map[string]error
 }
 
-func (f *fakeVyosRunner) GetSessionEnv(ctx context.Context, sessionID string) (map[string]string, error) {
-	f.calls = append(f.calls, "getSessionEnv:"+sessionID)
-	if f.errors != nil {
-		if err, ok := f.errors["getSessionEnv"]; ok {
-			return nil, err
-		}
-	}
-	if f.outputs != nil {
-		if output, ok := f.outputs["getSessionEnv"]; ok {
-			return map[string]string{"SESSION_ID": output}, nil
-		}
-	}
-	return map[string]string{
-		"VYATTA_CONFIG_SID": sessionID,
-		"COMMIT_VIA":        "api",
-	}, nil
+func (f *fakeVyosRunner) Begin(ctx context.Context) (string, error) {
+	return f.record("begin")
 }
 
-func (f *fakeVyosRunner) SetupSession(ctx context.Context, sessionEnv map[string]string) (string, error) {
-	return f.record("setupSession")
+func (f *fakeVyosRunner) End(ctx context.Context) (string, error) {
+	return f.record("end")
 }
 
-func (f *fakeVyosRunner) TeardownSession(ctx context.Context, sessionEnv map[string]string) (string, error) {
-	return f.record("teardownSession")
-}
-
-func (f *fakeVyosRunner) RunConfigCommand(ctx context.Context, sessionEnv map[string]string, command string) (string, error) {
+func (f *fakeVyosRunner) RunConfigCommand(ctx context.Context, command string) (string, error) {
 	return f.record("cmd:" + command)
 }
 
-func (f *fakeVyosRunner) Commit(ctx context.Context, sessionEnv map[string]string) (string, error) {
+func (f *fakeVyosRunner) Commit(ctx context.Context) (string, error) {
 	return f.record("commit")
 }
 
-func (f *fakeVyosRunner) Save(ctx context.Context, sessionEnv map[string]string) (string, error) {
+func (f *fakeVyosRunner) Save(ctx context.Context) (string, error) {
 	return f.record("save")
 }
 
-func (f *fakeVyosRunner) Discard(ctx context.Context, sessionEnv map[string]string) (string, error) {
+func (f *fakeVyosRunner) Discard(ctx context.Context) (string, error) {
 	return f.record("discard")
 }
 
@@ -93,19 +75,17 @@ Type: Positive
 Title: Session call order on success
 Summary:
 Executes a successful plan and records every runner call in order.
-The default executor must acquire session env, setup the session, apply commands,
-commit once, skip save by default, and always teardown.
+The default executor must begin a wrapper session, apply commands, commit once,
+skip save by default, and always end the session.
 
 Validates:
-  - getSessionEnv runs before setupSession
-  - setupSession runs before delete/set/commit
-  - my-operations happen in expected order and commit runs once
-  - teardownSession runs after commit on success
+  - begin runs before delete/set/commit
+  - Config operations happen in expected order and commit runs once
+  - end runs after commit on success
 */
 func TestDefaultExecutorUsesSessionLifecycleAndCommandOrder(t *testing.T) {
 	runner := &fakeVyosRunner{}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-001" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertNoApplyError(t, err)
@@ -114,14 +94,13 @@ func TestDefaultExecutorUsesSessionLifecycleAndCommandOrder(t *testing.T) {
 	}
 
 	assertStringSlicesEqual(t, runner.calls, []string{
-		"getSessionEnv:session-001",
-		"setupSession",
+		"begin",
 		"cmd:delete interfaces bridge",
 		"cmd:delete nat source",
 		"cmd:set interfaces bridge br0 address dhcp",
 		"cmd:set interfaces ethernet eth0 description 'WAN uplink'",
 		"commit",
-		"teardownSession",
+		"end",
 	})
 }
 
@@ -136,12 +115,11 @@ The executor should commit successfully and never call save.
 Validates:
   - Save is skipped when Plan.Save is false
   - Applied is true after commit
-  - Teardown still runs
+  - End still runs
 */
 func TestDefaultExecutorSkipsSaveWhenPlanSaveFalse(t *testing.T) {
 	runner := &fakeVyosRunner{}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-002" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertNoApplyError(t, err)
@@ -161,7 +139,7 @@ Type: Positive
 Title: Save runs after successful commit
 Summary:
 Runs execution with save enabled and a successful save result.
-Save must execute after commit and before teardown.
+Save must execute after commit and before end.
 
 Validates:
   - Save is called only when Plan.Save is true
@@ -171,7 +149,6 @@ Validates:
 func TestDefaultExecutorRunsSaveAfterCommitWhenEnabled(t *testing.T) {
 	runner := &fakeVyosRunner{outputs: map[string]string{"save": "save ok"}}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-003" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(true))
 	assertNoApplyError(t, err)
@@ -180,15 +157,14 @@ func TestDefaultExecutorRunsSaveAfterCommitWhenEnabled(t *testing.T) {
 	}
 
 	assertStringSlicesEqual(t, runner.calls, []string{
-		"getSessionEnv:session-003",
-		"setupSession",
+		"begin",
 		"cmd:delete interfaces bridge",
 		"cmd:delete nat source",
 		"cmd:set interfaces bridge br0 address dhcp",
 		"cmd:set interfaces ethernet eth0 description 'WAN uplink'",
 		"commit",
 		"save",
-		"teardownSession",
+		"end",
 	})
 }
 
@@ -198,21 +174,20 @@ Type: Negative
 Title: Delete failure discards and tears down
 Summary:
 Forces the first delete command to fail.
-The executor must attempt discard, return delete_failed, and teardown the session.
+The executor must attempt discard, return delete_failed, and end the session.
 
 Validates:
   - Delete failure returns delete_failed
   - Discard is attempted on failure
-  - TeardownSession still runs
+  - End still runs
 */
-func TestDefaultExecutorDeleteFailureAttemptsDiscardAndTeardown(t *testing.T) {
+func TestDefaultExecutorDeleteFailureAttemptsDiscardAndEnd(t *testing.T) {
 	failCall := "cmd:delete interfaces bridge"
 	runner := &fakeVyosRunner{
 		outputs: map[string]string{"discard": "discard ok"},
 		errors:  map[string]error{failCall: errors.New("delete failed")},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-004" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeDeleteFailed)
@@ -220,11 +195,10 @@ func TestDefaultExecutorDeleteFailureAttemptsDiscardAndTeardown(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 	assertStringSlicesEqual(t, runner.calls, []string{
-		"getSessionEnv:session-004",
-		"setupSession",
+		"begin",
 		"cmd:delete interfaces bridge",
 		"discard",
-		"teardownSession",
+		"end",
 	})
 }
 
@@ -234,29 +208,27 @@ Type: Negative
 Title: Set failure discards and tears down
 Summary:
 Forces the first set command to fail after delete succeeds.
-The executor must attempt discard, return set_failed, skip commit, and teardown.
+The executor must attempt discard, return set_failed, skip commit, and end.
 
 Validates:
   - Set failure returns set_failed
   - Discard is attempted on failure
   - Commit is not called
 */
-func TestDefaultExecutorSetFailureAttemptsDiscardAndTeardown(t *testing.T) {
+func TestDefaultExecutorSetFailureAttemptsDiscardAndEnd(t *testing.T) {
 	failCall := "cmd:set interfaces bridge br0 address dhcp"
 	runner := &fakeVyosRunner{errors: map[string]error{failCall: errors.New("set failed")}}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-005" }
 
 	_, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeSetFailed)
 	assertStringSlicesEqual(t, runner.calls, []string{
-		"getSessionEnv:session-005",
-		"setupSession",
+		"begin",
 		"cmd:delete interfaces bridge",
 		"cmd:delete nat source",
 		"cmd:set interfaces bridge br0 address dhcp",
 		"discard",
-		"teardownSession",
+		"end",
 	})
 }
 
@@ -266,20 +238,19 @@ Type: Negative
 Title: Commit failure discards and tears down
 Summary:
 Forces commit to fail after all commands execute successfully.
-The executor must return commit_failed, attempt discard, and teardown the session.
+The executor must return commit_failed, attempt discard, and end the session.
 
 Validates:
   - Commit failure returns commit_failed
   - Discard is attempted
-  - TeardownSession still runs
+  - End still runs
 */
-func TestDefaultExecutorCommitFailureAttemptsDiscardAndTeardown(t *testing.T) {
+func TestDefaultExecutorCommitFailureAttemptsDiscardAndEnd(t *testing.T) {
 	runner := &fakeVyosRunner{
 		outputs: map[string]string{"commit": "commit failed", "discard": "discard ok"},
 		errors:  map[string]error{"commit": errors.New("commit failed")},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-006" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeCommitFailed)
@@ -287,15 +258,14 @@ func TestDefaultExecutorCommitFailureAttemptsDiscardAndTeardown(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 	assertStringSlicesEqual(t, runner.calls, []string{
-		"getSessionEnv:session-006",
-		"setupSession",
+		"begin",
 		"cmd:delete interfaces bridge",
 		"cmd:delete nat source",
 		"cmd:set interfaces bridge br0 address dhcp",
 		"cmd:set interfaces ethernet eth0 description 'WAN uplink'",
 		"commit",
 		"discard",
-		"teardownSession",
+		"end",
 	})
 }
 
@@ -318,7 +288,6 @@ func TestDefaultExecutorSaveFailureReturnsAppliedTrue(t *testing.T) {
 		errors:  map[string]error{"save": errors.New("save failed")},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-007" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(true))
 	assertApplyCode(t, err, CodeSaveFailed)
@@ -338,7 +307,7 @@ The executor should keep set_failed as primary and include discard detail.
 Validates:
   - Primary failure code remains set_failed
   - Discard failure detail is included
-  - TeardownSession still runs
+  - End still runs
 */
 func TestDefaultExecutorDiscardFailureDoesNotHidePrimaryCode(t *testing.T) {
 	failCall := "cmd:set interfaces bridge br0 address dhcp"
@@ -349,7 +318,6 @@ func TestDefaultExecutorDiscardFailureDoesNotHidePrimaryCode(t *testing.T) {
 		},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-008" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeSetFailed)
@@ -361,23 +329,22 @@ func TestDefaultExecutorDiscardFailureDoesNotHidePrimaryCode(t *testing.T) {
 /*
 TC-VYOS-SESSION-009
 Type: Negative
-Title: Teardown failure after commit
+Title: End failure after commit
 Summary:
-Forces teardownSession to fail after a successful commit.
+Forces end to fail after a successful commit.
 The executor should return executor_failed while preserving Applied=true.
 
 Validates:
-  - Teardown failure returns executor_failed
+  - End failure returns executor_failed
   - Applied remains true after successful commit
   - Saved remains false when save is disabled
 */
-func TestDefaultExecutorTeardownFailureAfterCommitReturnsExecutorFailed(t *testing.T) {
+func TestDefaultExecutorEndFailureAfterCommitReturnsExecutorFailed(t *testing.T) {
 	runner := &fakeVyosRunner{
-		outputs: map[string]string{"teardownSession": "teardown failed output"},
-		errors:  map[string]error{"teardownSession": errors.New("teardown failed")},
+		outputs: map[string]string{"end": "end failed output"},
+		errors:  map[string]error{"end": errors.New("end failed")},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-009" }
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeExecutorFailed)
@@ -404,7 +371,6 @@ func TestDefaultExecutorContextCancellationStopsExecution(t *testing.T) {
 	cancel()
 	runner := &fakeVyosRunner{}
 	executor := newDefaultExecutorWithRunner(runner)
-	executor.sessionIDGenerator = func() string { return "session-010" }
 
 	_, err := executor.Execute(ctx, executorTestPlan(false))
 	assertApplyCode(t, err, CodeExecutorFailed)
