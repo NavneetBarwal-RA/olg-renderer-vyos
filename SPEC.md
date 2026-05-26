@@ -1866,13 +1866,21 @@ Fake executor and fake runner tests remain required because a real smoke run val
 
 ## 31. Repository Layout
 
-Desired layout after adding apply:
+Current implementation layout:
 
 ```text
 olg-renderer-vyos/
   go.mod
   README.md
   SPEC.md
+
+  cmd/
+    vyos-apply-smoke/
+      main.go
+      main_test.go
+
+  docs/
+    vyos-apply-smoke.md
 
   renderer/
     renderer.go
@@ -1887,6 +1895,17 @@ olg-renderer-vyos/
     parser.go
     policy.go
     planner.go
+    clones.go
+    default_executor.go
+    doc.go
+
+    engine_test.go
+    planner_test.go
+    parser_test.go
+    policy_test.go
+    default_executor_test.go
+    integration_test.go
+    test_helpers_test.go
 
   internal/
     normalize/
@@ -1905,7 +1924,9 @@ olg-renderer-vyos/
         vlan.tmpl
 
     vyos/
-      executor.go
+      doc.go
+      runner.go
+      runner_test.go
 
   testdata/
     valid/
@@ -1934,6 +1955,18 @@ olg-renderer-vyos/
     vyos/
       SOURCE.md
       vyos-config-schema.json
+```
+
+Layout notes:
+
+```text
+- renderer/ is the public render package that produces deterministic VyOS set commands.
+- apply/ is the public apply engine. Prepare is optional non-executing preview; Apply is the production execution API.
+- apply/default_executor.go installs and owns the default internal VyOS session executor used by apply.New().
+- internal/vyos/ contains the controlled VyOS session runner used by the default executor. It is not a public executor package.
+- cmd/vyos-apply-smoke/ is an opt-in lab-only command that uses apply.New(), Prepare(), and Apply(); it does not call internal/vyos directly.
+- docs/vyos-apply-smoke.md documents manual smoke-test usage, expected logs, and cleanup guidance.
+- NATS, KV, result/status publishing, and applied UUID state remain outside this repository.
 ```
 
 Add future files only when implementation requires them.
