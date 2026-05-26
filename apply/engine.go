@@ -6,7 +6,7 @@ const (
 	applyName     = "olg-renderer-vyos/apply"
 	applyVersion  = "dev"
 	applyTarget   = "vyos"
-	applyStrategy = "cloud-authoritative-reset-with-protected-roots"
+	applyStrategy = "managed-root-reconciliation"
 )
 
 // Engine validates rendered commands, prepares reset plans, and applies them through an Executor.
@@ -80,8 +80,12 @@ func (e *Engine) Apply(ctx context.Context, input Input) (Result, error) {
 	result := resultFromExecution(plan, execResult)
 	if err != nil {
 		code := CodeOf(err)
-		if code != CodeSaveFailed {
+		switch code {
+		case CodeDeleteFailed, CodeSetFailed, CodeCommitFailed:
 			result.Applied = false
+		case CodeSaveFailed, CodeExecutorFailed:
+			// Preserve executor-reported Applied for post-commit failures.
+			// Pre-commit executor failures should already report Applied=false.
 		}
 		if code != "" {
 			return result, err

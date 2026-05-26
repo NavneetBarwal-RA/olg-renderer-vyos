@@ -277,6 +277,92 @@ func TestApplyReturnsPartialResultOnCommitFailure(t *testing.T) {
 
 /*
 TC-APPLY-ENGINE-010
+Type: Negative
+Title: Executor failure after commit preserves applied
+Summary:
+Models a post-commit executor failure such as wrapper end failure.
+Apply should preserve the executor-reported Applied=true state.
+
+Validates:
+  - executor_failed is preserved
+  - Applied=true is preserved for post-commit executor failure
+  - Saved remains false
+*/
+func TestApplyPreservesAppliedTrueForPostCommitExecutorFailure(t *testing.T) {
+	exec := &fakeExecutor{
+		result: ExecutionResult{Applied: true},
+		err:    newError(CodeExecutorFailed, "session end failed after successful commit", nil),
+	}
+	engine, err := New(WithExecutor(exec))
+	assertNoApplyError(t, err)
+
+	result, err := engine.Apply(context.Background(), baseInput(sampleCommands()))
+	assertApplyCode(t, err, CodeExecutorFailed)
+	if !result.Applied || result.Saved {
+		t.Fatalf("post-commit executor failure did not preserve applied state: %#v", result)
+	}
+}
+
+/*
+TC-APPLY-ENGINE-011
+Type: Negative
+Title: Pre-commit typed failures force unapplied
+Summary:
+Simulates delete, set, and commit failures from an executor that incorrectly
+reports Applied=true. Apply should correct these pre-commit failure states.
+
+Validates:
+  - delete_failed forces Applied=false
+  - set_failed forces Applied=false
+  - commit_failed forces Applied=false
+*/
+func TestApplyForcesAppliedFalseForDeleteSetCommitFailures(t *testing.T) {
+	for _, code := range []Code{CodeDeleteFailed, CodeSetFailed, CodeCommitFailed} {
+		exec := &fakeExecutor{
+			result: ExecutionResult{Applied: true},
+			err:    newError(code, "pre-commit failure", nil),
+		}
+		engine, err := New(WithExecutor(exec))
+		assertNoApplyError(t, err)
+
+		result, err := engine.Apply(context.Background(), baseInput(sampleCommands()))
+		assertApplyCode(t, err, code)
+		if result.Applied {
+			t.Fatalf("%s failure reported applied: %#v", code, result)
+		}
+	}
+}
+
+/*
+TC-APPLY-ENGINE-012
+Type: Negative
+Title: Save failure preserves applied
+Summary:
+Simulates a save failure after the executor reports that commit succeeded.
+Apply should preserve Applied=true and keep Saved=false.
+
+Validates:
+  - save_failed is preserved
+  - Applied=true is preserved
+  - Saved=false is reported
+*/
+func TestApplyPreservesAppliedTrueForSaveFailure(t *testing.T) {
+	exec := &fakeExecutor{
+		result: ExecutionResult{Applied: true, Saved: false, SaveOutput: "save failed"},
+		err:    newError(CodeSaveFailed, "save failed after successful commit", nil),
+	}
+	engine, err := New(WithExecutor(exec), WithSaveAfterCommit(true))
+	assertNoApplyError(t, err)
+
+	result, err := engine.Apply(context.Background(), baseInput(sampleCommands()))
+	assertApplyCode(t, err, CodeSaveFailed)
+	if !result.Applied || result.Saved {
+		t.Fatalf("save failure did not preserve applied=true saved=false: %#v", result)
+	}
+}
+
+/*
+TC-APPLY-ENGINE-013
 Type: Positive
 Title: ConfigUUID is metadata only
 Summary:
@@ -306,7 +392,7 @@ func TestApplyPreservesConfigUUIDWithoutDuplicateDetection(t *testing.T) {
 }
 
 /*
-TC-APPLY-ENGINE-011
+TC-APPLY-ENGINE-014
 Type: Positive
 Title: New installs default executor
 Summary:
@@ -328,6 +414,31 @@ func TestNewInstallsDefaultExecutor(t *testing.T) {
 
 /*
 TC-APPLY-API-001
+Type: Positive
+Title: Managed-root strategy metadata
+Summary:
+Checks the public apply package strategy string.
+The metadata should stay aligned with the documented managed-root model.
+
+Validates:
+  - GetInfo reports managed-root-reconciliation
+  - Engine.Info reports the same strategy
+  - Strategy terminology does not drift to older names
+*/
+func TestInfoReportsManagedRootReconciliationStrategy(t *testing.T) {
+	info := GetInfo()
+	if info.ApplyStrategy != "managed-root-reconciliation" {
+		t.Fatalf("unexpected apply strategy: %q", info.ApplyStrategy)
+	}
+	engine, err := New(WithExecutor(&fakeExecutor{}))
+	assertNoApplyError(t, err)
+	if engine.Info().ApplyStrategy != info.ApplyStrategy {
+		t.Fatalf("engine info strategy drifted: %q != %q", engine.Info().ApplyStrategy, info.ApplyStrategy)
+	}
+}
+
+/*
+TC-APPLY-API-002
 Type: Positive
 Title: Input has no DryRun field
 Summary:
@@ -356,7 +467,7 @@ func TestInputDoesNotExposeDryRunField(t *testing.T) {
 }
 
 /*
-TC-APPLY-API-002
+TC-APPLY-API-003
 Type: Mixed
 Title: Info and error helpers
 Summary:

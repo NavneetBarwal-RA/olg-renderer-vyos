@@ -137,7 +137,7 @@ func parseFlags(args []string, out io.Writer, now func() time.Time) (smokeConfig
 	fs.BoolVar(&cfg.confirmed, "i-understand-this-modifies-vyos", false, "required safety confirmation for lab VyOS modification")
 	fs.StringVar(&cfg.target, "target", "vyos", "apply target")
 	fs.StringVar(&cfg.configUUID, "config-uuid", defaultConfigUUID(now), "config UUID for smoke traceability")
-	fs.StringVar(&cfg.mode, "mode", "minimal", "smoke payload mode: minimal, bridge, or nat")
+	fs.StringVar(&cfg.mode, "mode", "minimal", "smoke payload mode: minimal or bridge")
 	fs.BoolVar(&cfg.save, "save", false, "save configuration after successful commit")
 	fs.BoolVar(&cfg.skipApply, "skip-apply", false, "preview plan only; do not check VyOS binaries or call Apply")
 	usage := fs.Usage
@@ -165,10 +165,8 @@ func buildSmokeCommands(mode string) ([]string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "minimal", "bridge":
 		return []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}, nil
-	case "nat":
-		return []string{"set nat source rule 9999 translation address masquerade"}, nil
 	default:
-		return nil, fmt.Errorf("unsupported mode %q; expected minimal, bridge, or nat", mode)
+		return nil, fmt.Errorf("unsupported mode %q; expected minimal or bridge", mode)
 	}
 }
 

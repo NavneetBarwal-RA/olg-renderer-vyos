@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/routerarchitects/olg-renderer-vyos/internal/vyos"
 )
+
+const defaultCleanupTimeout = 5 * time.Second
 
 type vyosRunner interface {
 	Begin(ctx context.Context) (string, error)
@@ -43,7 +46,9 @@ func (e *defaultExecutor) Execute(ctx context.Context, plan Plan) (result Execut
 	}
 
 	defer func() {
-		output, endErr := e.runner.End(ctx)
+		cleanupCtx, cancel := cleanupContext(ctx)
+		defer cancel()
+		output, endErr := e.runner.End(cleanupCtx)
 		if endErr == nil {
 			return
 		}
@@ -130,7 +135,9 @@ func isContextError(err error) bool {
 }
 
 func (e *defaultExecutor) discardAfterFailure(ctx context.Context, primary error) (string, error) {
-	output, discardErr := e.runner.Discard(ctx)
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	output, discardErr := e.runner.Discard(cleanupCtx)
 	if discardErr != nil {
 		if output == "" {
 			output = fmt.Sprintf("discard failed: %v", discardErr)
@@ -140,6 +147,14 @@ func (e *defaultExecutor) discardAfterFailure(ctx context.Context, primary error
 		return output, fmt.Errorf("%w; discard failed: %v", primary, discardErr)
 	}
 	return output, primary
+}
+
+func cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if parent != nil {
+		base = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(base, defaultCleanupTimeout)
 }
 
 func checkExecutionContext(ctx context.Context) error {

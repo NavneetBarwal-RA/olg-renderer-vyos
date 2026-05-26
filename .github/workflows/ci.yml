@@ -32,13 +32,21 @@ jobs:
           cache: true
 
       - name: Verify gofmt
-        run: gofmt -w $(find . -name '*.go' -not -path './.git/*')
-
-      - name: Check formatting diff
-        run: git diff --exit-code
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "These files are not gofmt-formatted:"
+            echo "${unformatted}"
+            exit 1
+          fi
 
       - name: Run go test
         run: go test ./...
 
-      - name: Run go test race
+      - name: Run race tests
         run: go test -race ./...
+
+      - name: Run go build
+        run: go build ./...

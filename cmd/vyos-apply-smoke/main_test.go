@@ -21,7 +21,7 @@ The helper must keep defaults small and reject unknown mode values before apply.
 
 Validates:
   - minimal mode returns a bridge description command
-  - nat mode returns a NAT smoke command
+  - bridge mode returns the validated bridge command
   - unsupported modes are rejected
 */
 func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
@@ -31,7 +31,6 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 	}{
 		{mode: "minimal", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
 		{mode: "bridge", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
-		{mode: "nat", want: []string{"set nat source rule 9999 translation address masquerade"}},
 	}
 
 	for _, test := range tests {
@@ -44,8 +43,33 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 		}
 	}
 
-	if _, err := buildSmokeCommands("system"); err == nil {
+	for _, mode := range []string{"nat", "system"} {
+		if _, err := buildSmokeCommands(mode); err == nil {
+			t.Fatalf("expected unsupported mode %q to fail", mode)
+		}
+	}
+}
+
+/*
+TC-VYOS-SMOKE-007
+Type: Negative
+Title: NAT smoke mode is disabled
+Summary:
+Checks that nat mode is rejected until it can be made complete and explicit.
+The validated smoke path currently covers minimal bridge reconciliation.
+
+Validates:
+  - nat mode is rejected
+  - The error mentions supported modes
+  - NAT smoke cannot accidentally delete bridge without recreating it
+*/
+func TestBuildSmokeCommandsRejectsNatMode(t *testing.T) {
+	_, err := buildSmokeCommands("nat")
+	if err == nil {
 		t.Fatalf("expected unsupported mode error")
+	}
+	if !strings.Contains(err.Error(), "minimal or bridge") {
+		t.Fatalf("unexpected nat mode error: %v", err)
 	}
 }
 

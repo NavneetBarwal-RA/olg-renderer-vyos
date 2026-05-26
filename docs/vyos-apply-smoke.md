@@ -66,8 +66,9 @@ Optional modes:
 ```text
 minimal  set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
 bridge   same as minimal
-nat      set nat source rule 9999 translation address masquerade
 ```
+
+`nat` mode is intentionally disabled for now. The validated smoke path is the minimal bridge payload; a NAT smoke mode should only be added later if it is complete, explicit, and documented around managed-root implications.
 
 `--save=false` is the default. Use `--save=true` only when you intentionally want the committed runtime config persisted.
 

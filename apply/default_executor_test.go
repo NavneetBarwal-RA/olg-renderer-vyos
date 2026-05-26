@@ -5,40 +5,56 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeVyosRunner struct {
-	calls   []string
-	outputs map[string]string
-	errors  map[string]error
+	calls              []string
+	outputs            map[string]string
+	errors             map[string]error
+	afterCall          func(string)
+	contextCanceled    map[string]bool
+	contextHasDeadline map[string]bool
 }
 
 func (f *fakeVyosRunner) Begin(ctx context.Context) (string, error) {
-	return f.record("begin")
+	return f.record(ctx, "begin")
 }
 
 func (f *fakeVyosRunner) End(ctx context.Context) (string, error) {
-	return f.record("end")
+	return f.record(ctx, "end")
 }
 
 func (f *fakeVyosRunner) RunConfigCommand(ctx context.Context, command string) (string, error) {
-	return f.record("cmd:" + command)
+	return f.record(ctx, "cmd:"+command)
 }
 
 func (f *fakeVyosRunner) Commit(ctx context.Context) (string, error) {
-	return f.record("commit")
+	return f.record(ctx, "commit")
 }
 
 func (f *fakeVyosRunner) Save(ctx context.Context) (string, error) {
-	return f.record("save")
+	return f.record(ctx, "save")
 }
 
 func (f *fakeVyosRunner) Discard(ctx context.Context) (string, error) {
-	return f.record("discard")
+	return f.record(ctx, "discard")
 }
 
-func (f *fakeVyosRunner) record(call string) (string, error) {
+func (f *fakeVyosRunner) record(ctx context.Context, call string) (string, error) {
 	f.calls = append(f.calls, call)
+	if f.contextCanceled == nil {
+		f.contextCanceled = map[string]bool{}
+	}
+	if f.contextHasDeadline == nil {
+		f.contextHasDeadline = map[string]bool{}
+	}
+	f.contextCanceled[call] = ctx.Err() != nil
+	_, hasDeadline := ctx.Deadline()
+	f.contextHasDeadline[call] = hasDeadline
+	if f.afterCall != nil {
+		f.afterCall(call)
+	}
 	if f.outputs != nil {
 		if output, ok := f.outputs[call]; ok {
 			if f.errors != nil {
@@ -376,5 +392,111 @@ func TestDefaultExecutorContextCancellationStopsExecution(t *testing.T) {
 	assertApplyCode(t, err, CodeExecutorFailed)
 	if len(runner.calls) != 0 {
 		t.Fatalf("runner was called after cancellation: %#v", runner.calls)
+	}
+}
+
+/*
+TC-VYOS-SESSION-011
+Type: Negative
+Title: End cleanup ignores caller cancellation
+Summary:
+Cancels the caller context after begin succeeds.
+The executor should still call end with a non-canceled bounded cleanup context.
+
+Validates:
+  - End is attempted after caller cancellation
+  - End receives a non-canceled context
+  - End cleanup context has a deadline
+*/
+func TestDefaultExecutorEndUsesNonCanceledCleanupContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &fakeVyosRunner{}
+	runner.afterCall = func(call string) {
+		if call == "begin" {
+			cancel()
+		}
+	}
+	executor := newDefaultExecutorWithRunner(runner)
+
+	_, err := executor.Execute(ctx, executorTestPlan(false))
+	assertApplyCode(t, err, CodeExecutorFailed)
+	if runner.contextCanceled["end"] {
+		t.Fatalf("end received canceled caller context: %#v", runner.contextCanceled)
+	}
+	if !runner.contextHasDeadline["end"] {
+		t.Fatalf("end cleanup context did not have a deadline: %#v", runner.contextHasDeadline)
+	}
+}
+
+/*
+TC-VYOS-SESSION-012
+Type: Negative
+Title: Discard cleanup ignores caller cancellation
+Summary:
+Cancels the caller context as a set command fails.
+Discard should still run with a non-canceled bounded cleanup context.
+
+Validates:
+  - Discard is attempted after set failure
+  - Discard receives a non-canceled context
+  - Discard cleanup context has a deadline
+*/
+func TestDefaultExecutorDiscardUsesNonCanceledCleanupContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	failCall := "cmd:set interfaces bridge br0 address dhcp"
+	runner := &fakeVyosRunner{errors: map[string]error{failCall: errors.New("set failed")}}
+	runner.afterCall = func(call string) {
+		if call == failCall {
+			cancel()
+		}
+	}
+	executor := newDefaultExecutorWithRunner(runner)
+
+	_, err := executor.Execute(ctx, executorTestPlan(false))
+	assertApplyCode(t, err, CodeSetFailed)
+	if runner.contextCanceled["discard"] {
+		t.Fatalf("discard received canceled caller context: %#v", runner.contextCanceled)
+	}
+	if !runner.contextHasDeadline["discard"] {
+		t.Fatalf("discard cleanup context did not have a deadline: %#v", runner.contextHasDeadline)
+	}
+	if runner.contextCanceled["end"] {
+		t.Fatalf("end received canceled caller context after discard: %#v", runner.contextCanceled)
+	}
+	if !runner.contextHasDeadline["end"] {
+		t.Fatalf("end cleanup context did not have a deadline: %#v", runner.contextHasDeadline)
+	}
+}
+
+/*
+TC-VYOS-SESSION-013
+Type: Positive
+Title: Cleanup context timeout is bounded
+Summary:
+Creates a cleanup context from a canceled parent context.
+The cleanup context should ignore caller cancellation but still have a deadline.
+
+Validates:
+  - Cleanup context is not immediately canceled
+  - Cleanup context has a deadline
+  - Cleanup deadline is bounded by defaultCleanupTimeout
+*/
+func TestCleanupContextIsBounded(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+
+	ctx, cancel := cleanupContext(parent)
+	defer cancel()
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("cleanup context inherited cancellation: %v", err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("cleanup context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > defaultCleanupTimeout {
+		t.Fatalf("cleanup deadline outside expected bound: %s", remaining)
 	}
 }
