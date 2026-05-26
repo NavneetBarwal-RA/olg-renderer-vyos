@@ -44,7 +44,7 @@ apply/
   public apply engine API
 
 internal/vyos:
-  controlled VyOS cli-shell-api runner used by the default apply executor
+  controlled VyOS session runner used by the default apply executor
 ```
 
 ---
@@ -221,7 +221,7 @@ The renderer describes the desired configuration only. Delete, apply, commit, sa
 
 ## Apply package
 
-The public `apply` package safely applies renderer-generated VyOS `set` commands using a cloud-authoritative reset model with protected roots. It validates the rendered command text, builds a deterministic reset plan, then executes that structured plan through the default VyOS CLI-shell executor unless an advanced caller overrides the executor.
+The public `apply` package safely applies renderer-generated VyOS `set` commands using a cloud-authoritative reset model with protected roots. It validates the rendered command text, builds a deterministic reset plan, then executes that structured plan through the default internal VyOS session executor unless an advanced caller overrides the executor.
 
 ### Public API
 
@@ -317,9 +317,21 @@ type Executor interface {
 }
 ```
 
-The default executor uses the internal VyOS runner, which invokes `/usr/bin/cli-shell-api` with one argument vector per configure operation. It enters configure mode, runs delete commands in order, runs set commands in order, commits once, and saves only when `WithSaveAfterCommit(true)` is configured.
+The default executor uses the documented VyOS CLI Shell API session model:
 
-The default executor assumes those `cli-shell-api` invocations participate in the intended VyOS candidate configuration transaction on the target image. That session behavior must be validated on the deployed VyOS version before production rollout.
+```text
+/usr/bin/cli-shell-api getSessionEnv <session-id>
+/usr/bin/cli-shell-api setupSession
+/opt/vyatta/sbin/my_delete ...
+/opt/vyatta/sbin/my_set ...
+/opt/vyatta/sbin/my_commit
+optional /opt/vyatta/sbin/vyatta-save-config.pl when save is enabled
+/usr/bin/cli-shell-api teardownSession
+```
+
+On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured.
+
+The default executor assumes this session model matches the deployed VyOS image. Real VyOS validation in a lab or target image is still required before production rollout.
 
 The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced controlled integrations. Custom executors receive already validated `Plan` data from `Apply`, but they can bypass runtime execution safety if implemented incorrectly, so they must not execute concatenated shell strings or expose arbitrary command execution.
 
@@ -330,6 +342,8 @@ The apply package intentionally does not expose generic raw APIs such as `Run`, 
 `olg-server-vyos-client-natagent` should load desired config from KV, call `renderer.Render(...)`, verify `RenderedText` is non-empty, then call `apply.Engine.Apply(...)`. The agent does not call or import executor internals separately.
 
 The NAT client owns KV loading, NATS command handling, applied UUID state, duplicate detection, startup reconcile, and result/status publishing.
+
+Lab-only smoke test guidance for manual VyOS validation is documented in [docs/vyos-apply-smoke.md](docs/vyos-apply-smoke.md).
 
 Example `Prepare` usage:
 

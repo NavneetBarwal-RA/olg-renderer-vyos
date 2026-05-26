@@ -893,7 +893,7 @@ Prepare must not:
 
 ```text
 - call the executor
-- enter VyOS configure mode
+- enter/setup a VyOS CLI session
 - delete config
 - set config
 - commit
@@ -1002,17 +1002,19 @@ Rationale:
 Execution must use one candidate configuration transaction:
 
 ```text
-configure
-  delete reset roots
-  set rendered desired commands
-  commit
+cli-shell-api getSessionEnv <session-id>
+cli-shell-api setupSession
+  my_delete reset roots
+  my_set rendered desired commands
+  my_commit
+cli-shell-api teardownSession
 ```
 
 Do not commit after delete and before set.
 
-`apply.New()` constructs an engine with the default VyOS CLI-shell executor. `WithExecutor(...)` remains available for tests and advanced controlled integrations, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
+`apply.New()` constructs an engine with the default internal VyOS session executor. `WithExecutor(...)` remains available for tests and advanced controlled integrations, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
 
-The default executor assumes `cli-shell-api` invocations participate in the intended VyOS candidate configuration transaction on the target image. This transaction/session behavior must be validated on the deployed VyOS version or image before production rollout.
+The default executor assumes the documented `cli-shell-api` + `my_*` session model matches the target image. This transaction/session behavior must be validated on the deployed VyOS version or image before production rollout.
 
 ---
 
@@ -1277,12 +1279,13 @@ type Executor interface {
 Executor responsibilities:
 
 ```text
-- open/enter VyOS configure context
+- initialize VyOS session with getSessionEnv/setupSession
 - apply delete commands
 - apply set commands
-- commit
+- commit with my_commit
 - optionally save if configured
 - discard candidate config on failure where possible
+- always teardownSession after setupSession
 ```
 
 Executor safety requirements:
@@ -1306,12 +1309,14 @@ Default executor:
 
 ```text
 apply.New()
-  -> internal VyOS CLI-shell executor
+  -> default internal VyOS session executor
   -> internal/vyos runner
-  -> cli-shell-api configure/delete/set/commit/save/discard operations
+  -> cli-shell-api getSessionEnv/setupSession/teardownSession
+  -> my_delete/my_set/my_commit/my_discard
+  -> optional vyatta-save-config.pl
 ```
 
-The default runner invokes `/usr/bin/cli-shell-api` once per operation using an argv boundary. It must not rely on PATH lookup, use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
+The default runner invokes absolute binary paths with argv boundaries (`/usr/bin/cli-shell-api`, `/opt/vyatta/sbin/my_set`, `/opt/vyatta/sbin/my_delete`, `/opt/vyatta/sbin/my_commit`, `/opt/vyatta/sbin/my_discard`, and `/opt/vyatta/sbin/vyatta-save-config.pl`). It must not rely on PATH lookup, use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
 
 `internal/vyos.RunConfigCommand` is not a generic command runner. It must only receive commands from a validated `apply.Plan`, and it includes last-resort guards that reject empty commands, newlines, obvious shell/control metacharacters, and operations other than `set` or `delete`.
 
@@ -1320,12 +1325,14 @@ The default runner invokes `/usr/bin/cli-shell-api` once per operation using an 
 Failure behavior:
 
 ```text
-- configure/session enter failure returns executor_failed
+- getSessionEnv/setupSession failure returns executor_failed
 - delete failure attempts discard and returns delete_failed
 - set failure attempts discard and returns set_failed
 - commit failure attempts discard and returns commit_failed
 - save failure after successful commit returns save_failed with Applied=true and Saved=false
 - discard failure must not hide the primary failure code
+- teardownSession failure after a primary failure preserves the primary failure code and appends teardown detail
+- teardownSession failure after successful commit returns executor_failed while preserving Applied=true
 - context cancellation stops execution and returns a typed executor_failed/apply_failed error
 ```
 
@@ -1787,7 +1794,7 @@ Required:
 - save disabled by default
 - apply.New installs the default VyOS CLI-shell executor
 - WithExecutor(fake) overrides the default executor for tests
-- default executor runs configure, deletes, sets, commit, and optional save in order
+- default executor runs getSessionEnv/setupSession, deletes, sets, commit, optional save, and teardownSession in order
 - default executor attempts discard on delete, set, and commit failure
 - save failure after commit returns save_failed with Applied=true
 - GitHub Actions CI runs gofmt check, go test ./..., and go test -race ./...

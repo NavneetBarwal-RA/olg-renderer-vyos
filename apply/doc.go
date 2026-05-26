@@ -12,10 +12,12 @@
 //
 // Prepare validates input and returns a non-executing Plan. Apply is the
 // production execution API: it uses the same preparation logic, calls the default
-// controlled VyOS CLI-shell executor with structured delete and set command
-// slices, commits once, and saves only when configured. ConfigUUID is
-// traceability metadata only; the package never uses it for duplicate detection
-// or applied-state comparison.
+// controlled VyOS executor with structured delete and set command slices,
+// enters a documented VyOS session via cli-shell-api
+// getSessionEnv/setupSession/teardownSession, mutates config with
+// my_delete/my_set/my_commit/my_discard, and saves only when configured.
+// ConfigUUID is traceability metadata only; the package never uses it for
+// duplicate detection or applied-state comparison.
 //
 // WithExecutor is available for tests and advanced controlled integrations, but
 // custom executors can bypass runtime execution safety if implemented
