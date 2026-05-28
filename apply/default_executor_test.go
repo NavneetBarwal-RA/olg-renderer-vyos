@@ -507,6 +507,51 @@ func TestDefaultExecutorDiscardUsesNonCanceledCleanupContext(t *testing.T) {
 }
 
 /*
+TC-VYOS-SESSION-016
+Type: Negative
+Title: Context cancellation after mutation discards and tears down
+Summary:
+Cancels the caller context after one delete command succeeds.
+The executor should return a context cancellation error, then discard and close
+the already-open candidate session with a non-canceled bounded cleanup context.
+
+Validates:
+  - A pre-commit cancellation after mutation returns executor_failed
+  - Discard is attempted before teardown
+  - Discard and teardown receive cleanup contexts
+*/
+func TestDefaultExecutorDiscardsOnContextCancellationAfterMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &fakeVyosRunner{}
+	runner.afterCall = func(call string) {
+		if call == "cmd:delete interfaces bridge" {
+			cancel()
+		}
+	}
+	executor := newDefaultExecutorWithRunner(runner)
+
+	result, err := executor.Execute(ctx, executorTestPlan(false))
+	assertApplyCode(t, err, CodeExecutorFailed)
+	if result.Applied || result.Saved {
+		t.Fatalf("unexpected applied state after cancellation: %#v", result)
+	}
+	assertStringSlicesEqual(t, runner.calls, []string{
+		"begin",
+		"cmd:delete interfaces bridge",
+		"discard",
+		"end",
+	})
+	for _, call := range []string{"discard", "end"} {
+		if runner.contextCanceled[call] {
+			t.Fatalf("%s received canceled caller context: %#v", call, runner.contextCanceled)
+		}
+		if !runner.contextHasDeadline[call] {
+			t.Fatalf("%s cleanup context did not have a deadline: %#v", call, runner.contextHasDeadline)
+		}
+	}
+}
+
+/*
 TC-VYOS-SESSION-013
 Type: Positive
 Title: Cleanup context timeout is bounded

@@ -82,6 +82,9 @@ func (e *defaultExecutor) Execute(ctx context.Context, plan Plan) (result Execut
 	defer func() {
 		cleanupCtx, cancel := cleanupContext(ctx)
 		defer cancel()
+		// Any pre-commit exit path, including context cancellation after
+		// delete/set mutations, must discard the candidate session before
+		// teardown.
 		if !committed && !discarded {
 			output, discardErr := session.Discard(cleanupCtx)
 			result.DiscardOutput = appendOutput(result.DiscardOutput, output)

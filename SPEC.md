@@ -1308,10 +1308,18 @@ Save behavior:
 ```text
 - save=false means runtime commit only.
 - save=false must not require or call any save helper.
-- save=true persists configuration after commit.
+- save=true persists configuration after commit only after manual validation on the target VyOS image.
 - Modern VyOS rolling images may not have /opt/vyatta/sbin/vyatta-save-config.pl.
 - The renderer/apply engine must not depend on /opt/vyatta/sbin/vyatta-save-config.pl.
 - Persistence is performed by passing `save` through /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper.
+```
+
+Recommended agent apply setting:
+
+```yaml
+agent:
+  apply:
+    save_after_commit: false
 ```
 
 ---

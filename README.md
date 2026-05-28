@@ -363,7 +363,7 @@ release /run/lock/olg-vyos-apply.lock
 
 The default session identifier is the apply process ID. The session environment returned by `getSessionEnv` is reused for every delete, set, commit, save, discard, and teardown operation in that apply. The executor does not run independent stateless wrapper `begin`, `set`, `commit`, and `end` calls after opening a session.
 
-On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Cleanup uses a bounded context that ignores caller cancellation so discard and teardown are still attempted after cancellation. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` with the same session environment; modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
+On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Cleanup uses a bounded context that ignores caller cancellation so discard and teardown are still attempted after cancellation. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` with the same session environment; enable it only after manually validating that save mechanism on the target VyOS image. Modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
 
 The local apply lock prevents two agent apply operations from running concurrently in this process/device path. It does not prevent a human from opening `configure`. Hard process kills, VM crashes, or `SIGKILL` can still interrupt cleanup; startup cleanup or a reboot may be required if VyOS reports stale candidate overlays.
 
@@ -508,7 +508,15 @@ Critical requirement:
 The saved bootstrap config must be sufficient for the agent to reconnect to NATS/KV after reboot.
 ```
 
-Saving after commit is available as an explicit option, but it is not the default behavior. `save=false` means runtime commit only. `save=true` persists configuration by running `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; the apply engine must not require `/opt/vyatta/sbin/vyatta-save-config.pl`.
+Saving after commit is available as an explicit option, but it is not the default behavior. `save=false` means runtime commit only. `save=true` persists configuration by running `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; enable it only after manual validation on the specific target VyOS image. The apply engine must not require `/opt/vyatta/sbin/vyatta-save-config.pl`.
+
+Recommended agent apply setting:
+
+```yaml
+agent:
+  apply:
+    save_after_commit: false
+```
 
 ---
 

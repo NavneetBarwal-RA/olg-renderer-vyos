@@ -47,7 +47,7 @@ Run the command on a VyOS image where these binaries exist and are executable:
 /opt/vyatta/sbin/my_discard
 ```
 
-When `--save=true`, the command also requires `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` because save runs as `vyatta-cfg-cmd-wrapper save`. `--save=false` does not require the wrapper.
+When `--save=true`, the command also requires `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` because save runs as `vyatta-cfg-cmd-wrapper save`. `--save=false` does not require the wrapper. Use `--save=true` only after manually validating that save mechanism on the specific target VyOS image.
 
 Modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`. The smoke command and default apply executor do not depend on that legacy helper.
 
@@ -86,7 +86,7 @@ bridge            compatibility alias for minimal-targeted
 
 `nat` mode is intentionally disabled for now. The validated smoke path is the minimal bridge payload; a NAT smoke mode should only be added later if it is complete, explicit, and documented around managed-root implications.
 
-`--save=false` is the default. Use `--save=true` only when you intentionally want the committed runtime config persisted.
+`--save=false` is the default and recommended smoke setting. Use `--save=true` only when you intentionally want the committed runtime config persisted and have validated save on that VyOS image.
 
 ## Expected Output Excerpt
 

@@ -21,6 +21,7 @@ Builds smoke payload commands for supported modes and an unsupported mode.
 The helper must keep defaults small and reject unknown mode values before apply.
 
 Validates:
+  - minimal and bridge aliases return a bridge description command
   - minimal-targeted mode returns a bridge description command
   - minimal-managed mode returns the same validated bridge command
   - unsupported modes are rejected
@@ -30,6 +31,8 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 		mode string
 		want []string
 	}{
+		{mode: "minimal", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "bridge", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
 		{mode: "minimal-targeted", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
 		{mode: "minimal-managed", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
 	}
@@ -186,7 +189,7 @@ Validates:
 func TestLogPlanIncludesCountsAndCommands(t *testing.T) {
 	var out strings.Builder
 	plan := apply.Plan{
-		DeleteCommands: []string{"delete interfaces bridge", "delete nat source"},
+		DeleteCommands: []string{"delete interfaces bridge br0"},
 		SetCommands:    []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"},
 		Commit:         true,
 		Save:           false,
@@ -195,9 +198,8 @@ func TestLogPlanIncludesCountsAndCommands(t *testing.T) {
 	logPlan(&out, plan)
 	got := out.String()
 	for _, want := range []string{
-		"[smoke] plan delete_count=2 set_count=1 commit=true save=false",
-		"[smoke] delete[0]=delete interfaces bridge",
-		"[smoke] delete[1]=delete nat source",
+		"[smoke] plan delete_count=1 set_count=1 commit=true save=false",
+		"[smoke] delete[0]=delete interfaces bridge br0",
 		"[smoke] set[0]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
 	} {
 		if !strings.Contains(got, want) {
@@ -247,35 +249,37 @@ func TestRunSkipApplyPreviewsWithoutRealBinaries(t *testing.T) {
 }
 
 func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
-	options, err := applyOptionsForSmoke("minimal-targeted", false)
-	if err != nil {
-		t.Fatalf("applyOptionsForSmoke: %v", err)
-	}
-	engine, err := apply.New(options...)
-	if err != nil {
-		t.Fatalf("new apply engine: %v", err)
-	}
-	plan, err := engine.Prepare(testContext(), apply.Input{
-		Target:          "vyos",
-		ConfigUUID:      "cfg-123",
-		DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
-	})
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge br0"}) {
-		t.Fatalf("unexpected targeted deletes: %#v", plan.DeleteCommands)
+	for _, mode := range []string{"", "minimal", "bridge", "minimal-targeted"} {
+		options, err := applyOptionsForSmoke(mode, false)
+		if err != nil {
+			t.Fatalf("applyOptionsForSmoke(%q): %v", mode, err)
+		}
+		engine, err := apply.New(options...)
+		if err != nil {
+			t.Fatalf("new apply engine for %q: %v", mode, err)
+		}
+		plan, err := engine.Prepare(testContext(), apply.Input{
+			Target:          "vyos",
+			ConfigUUID:      "cfg-123",
+			DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
+		})
+		if err != nil {
+			t.Fatalf("prepare for %q: %v", mode, err)
+		}
+		if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge br0"}) {
+			t.Fatalf("unexpected targeted deletes for %q: %#v", mode, plan.DeleteCommands)
+		}
 	}
 
-	options, err = applyOptionsForSmoke("minimal-managed", false)
+	options, err := applyOptionsForSmoke("minimal-managed", false)
 	if err != nil {
 		t.Fatalf("applyOptionsForSmoke managed: %v", err)
 	}
-	engine, err = apply.New(options...)
+	engine, err := apply.New(options...)
 	if err != nil {
 		t.Fatalf("new managed apply engine: %v", err)
 	}
-	plan, err = engine.Prepare(testContext(), apply.Input{
+	plan, err := engine.Prepare(testContext(), apply.Input{
 		Target:          "vyos",
 		ConfigUUID:      "cfg-123",
 		DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",

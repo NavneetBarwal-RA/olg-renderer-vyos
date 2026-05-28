@@ -158,7 +158,7 @@ func parseFlags(args []string, out io.Writer, now func() time.Time) (smokeConfig
 	fs.BoolVar(&cfg.confirmed, "i-understand-this-modifies-vyos", false, "required safety confirmation for lab VyOS modification")
 	fs.StringVar(&cfg.target, "target", "vyos", "apply target")
 	fs.StringVar(&cfg.configUUID, "config-uuid", defaultConfigUUID(now), "config UUID for smoke traceability")
-	fs.StringVar(&cfg.mode, "mode", "minimal-targeted", "smoke payload mode: minimal-targeted or minimal-managed")
+	fs.StringVar(&cfg.mode, "mode", "minimal-targeted", "smoke payload mode: minimal-targeted or minimal-managed; minimal and bridge alias minimal-targeted")
 	fs.BoolVar(&cfg.save, "save", false, "save configuration after successful commit")
 	fs.BoolVar(&cfg.skipApply, "skip-apply", false, "preview plan only; do not check VyOS binaries or call Apply")
 	usage := fs.Usage
@@ -187,7 +187,7 @@ func buildSmokeCommands(mode string) ([]string, error) {
 	case "", "minimal", "bridge", "minimal-targeted", "minimal-managed":
 		return []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}, nil
 	default:
-		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed", mode)
+		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed; minimal and bridge alias minimal-targeted", mode)
 	}
 }
 
@@ -199,7 +199,7 @@ func applyOptionsForSmoke(mode string, save bool) ([]apply.Option, error) {
 	case "minimal-managed":
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed", mode)
+		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed; minimal and bridge alias minimal-targeted", mode)
 	}
 }
 

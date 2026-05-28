@@ -15,9 +15,9 @@
 // controlled VyOS executor with structured delete and set command slices,
 // enters one persistent VyOS CLI Shell API session, mutates config through
 // my_delete/my_set/my_commit, discards on failure, tears down the session, and
-// saves through wrapper save only when configured. ConfigUUID is traceability
-// metadata only; the package never uses it for duplicate detection or
-// applied-state comparison.
+// saves through wrapper save only when configured and manually validated for
+// the target image. ConfigUUID is traceability metadata only; the package never
+// uses it for duplicate detection or applied-state comparison.
 //
 // WithExecutor is available for tests and advanced controlled integrations, but
 // custom executors can bypass runtime execution safety if implemented
