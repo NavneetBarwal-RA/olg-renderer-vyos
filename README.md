@@ -2,7 +2,7 @@
 
 `olg-renderer-vyos` is the VyOS configuration library for OLG/uCentral desired configuration.
 
-The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default VyOS wrapper executor using managed-root reconciliation.
+The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default persistent VyOS CLI Shell API session executor using managed-root reconciliation.
 
 ```text
 OLG/uCentral JSON
@@ -221,7 +221,7 @@ The renderer describes the desired configuration only. Delete, apply, commit, sa
 
 ## Apply package
 
-The public `apply` package safely applies renderer-generated VyOS `set` commands using managed-root reconciliation. It validates the rendered command text, builds a deterministic plan that replaces only explicitly managed roots, then executes that structured plan through the default internal VyOS wrapper executor unless an advanced caller overrides the executor.
+The public `apply` package safely applies renderer-generated VyOS `set` commands using managed-root reconciliation. It validates the rendered command text, builds a deterministic plan that replaces only explicitly managed roots, then executes that structured plan through the default internal VyOS CLI Shell API session executor unless an advanced caller overrides the executor.
 
 Current default behavior:
 
@@ -291,6 +291,8 @@ Applied
 Saved
 DeleteCommands
 SetCommands
+DeleteOutput
+SetOutput
 CommitOutput
 SaveOutput
 DiscardOutput
@@ -320,7 +322,7 @@ delete nat source
 
 Unmanaged VyOS config must not be deleted by the default apply path, including `system login`, `system config-management`, `service ntp`, `interfaces loopback`, `interfaces ethernet` / WAN access, and other non-owned configuration. For this phase, whole-device reconciliation is not the design because an incomplete preserve list could delete SSH, login, WAN, NTP, or other system config. Full-device reconciliation, if ever added, must be a separate explicit mode with stronger safeguards.
 
-For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge` and `nat source`; all other roots are rejected.
+For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge`, `interfaces bridge br0` for targeted lab smoke, and `nat source`; all other roots are rejected.
 
 ### Command validation
 
@@ -344,20 +346,26 @@ type Executor interface {
 }
 ```
 
-The default executor uses the modern VyOS configuration wrapper model:
+The default executor uses one persistent VyOS CLI Shell API configuration session:
 
 ```text
-/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper begin
-/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper delete ...
-/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper set ...
-/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper commit
+acquire /run/lock/olg-vyos-apply.lock
+/usr/bin/cli-shell-api getSessionEnv <apply-process-id>
+/usr/bin/cli-shell-api setupSession
+/opt/vyatta/sbin/my_delete ...
+/opt/vyatta/sbin/my_set ...
+/opt/vyatta/sbin/my_commit
 optional /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper save when save is enabled
-/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end
+/opt/vyatta/sbin/my_discard on failure before commit
+/usr/bin/cli-shell-api teardownSession
+release /run/lock/olg-vyos-apply.lock
 ```
 
-On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper discard` before returning the typed apply error. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
+The default session identifier is the apply process ID. The session environment returned by `getSessionEnv` is reused for every delete, set, commit, save, discard, and teardown operation in that apply. The executor does not run independent stateless wrapper `begin`, `set`, `commit`, and `end` calls after opening a session.
 
-The default executor assumes this session model matches the deployed VyOS image. Real VyOS validation in a lab or target image is still required before production rollout.
+On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Cleanup uses a bounded context that ignores caller cancellation so discard and teardown are still attempted after cancellation. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` with the same session environment; modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
+
+The local apply lock prevents two agent apply operations from running concurrently in this process/device path. It does not prevent a human from opening `configure`. Hard process kills, VM crashes, or `SIGKILL` can still interrupt cleanup; startup cleanup or a reboot may be required if VyOS reports stale candidate overlays.
 
 The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced controlled integrations. Custom executors receive already validated `Plan` data from `Apply`, but they can bypass runtime execution safety if implemented incorrectly, so they must not execute concatenated shell strings or expose arbitrary command execution.
 
@@ -378,13 +386,13 @@ The repository includes an opt-in manual smoke command for disposable/lab VyOS t
 Preview without applying:
 
 ```bash
-go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --skip-apply
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal-targeted --skip-apply
 ```
 
 Run on a lab VyOS VM/device:
 
 ```bash
-go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal --save=false
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal-targeted --save=false
 ```
 
 The command logs required binary checks, apply input, `Prepare` plan details, `Apply` result fields, errors, and cleanup guidance with a `[smoke]` prefix. Expected output includes:
@@ -392,15 +400,19 @@ The command logs required binary checks, apply input, `Prepare` plan details, `A
 ```text
 [smoke] starting VyOS apply smoke test
 [smoke] checking required binaries
-[smoke] found /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper
+[smoke] found /usr/bin/cli-shell-api
+[smoke] found /opt/vyatta/sbin/my_set
+[smoke] found /opt/vyatta/sbin/my_delete
+[smoke] found /opt/vyatta/sbin/my_commit
+[smoke] found /opt/vyatta/sbin/my_discard
 [smoke] previewing plan with Prepare
-[smoke] plan delete_count=2 set_count=1 commit=true save=false
+[smoke] plan delete_count=1 set_count=1 commit=true save=false
 [smoke] applying plan through Apply
 [smoke] result applied=true saved=false
 [smoke] completed successfully
 ```
 
-Smoke interpretation: the preview plan `delete interfaces bridge`, `delete nat source`, and `set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'` means apply will replace only the managed roots. Bridge config is managed and recreated, NAT source config is managed and recreated, and other VyOS config remains untouched unless it is under a managed root. Manually changing `interfaces bridge br0 description` is expected to be overwritten on the next smoke apply because `interfaces bridge` is managed.
+Smoke interpretation: the default `minimal-targeted` preview plan `delete interfaces bridge br0` and `set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'` replaces only the smoke bridge node. Use `--mode minimal-managed` when you intentionally want the smoke command to exercise the normal managed-root policy with `delete interfaces bridge` and `delete nat source`. Manually changing `interfaces bridge br0 description` is expected to be overwritten on the next targeted smoke apply because that node is reset by the smoke policy.
 
 Verification commands for a lab VyOS VM:
 
@@ -409,7 +421,7 @@ show configuration commands | match "interfaces bridge"
 show configuration commands | match "OLG_APPLY_SMOKE_TEST"
 ```
 
-Warning: the normal apply policy may delete `interfaces bridge` and `nat source`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
+Warning: `minimal-targeted` deletes `interfaces bridge br0`; `minimal-managed` uses the normal apply policy and may delete `interfaces bridge` and `nat source`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
 
 Example `Prepare` usage:
 

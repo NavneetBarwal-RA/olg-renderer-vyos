@@ -56,16 +56,17 @@ The normalized order should be preserved exactly in generated deletes.
 
 Validates:
   - interfaces bridge is accepted
+  - interfaces bridge br0 is accepted for targeted lab smoke
   - nat source is accepted
   - Internal whitespace is normalized
 */
 func TestWithResetPolicyAcceptsAllowedRoots(t *testing.T) {
-	engine, err := New(WithResetPolicy(ResetPolicy{ResetRoots: []string{" nat   source ", "interfaces\tbridge"}}))
+	engine, err := New(WithResetPolicy(ResetPolicy{ResetRoots: []string{" nat   source ", "interfaces\tbridge", "interfaces bridge   br0"}}))
 	assertNoApplyError(t, err)
 
 	plan, err := engine.Prepare(contextBackground(), baseInput(sampleCommands()))
 	assertNoApplyError(t, err)
-	assertStringSlicesEqual(t, plan.DeleteCommands, []string{"delete nat source", "delete interfaces bridge"})
+	assertStringSlicesEqual(t, plan.DeleteCommands, []string{"delete nat source", "delete interfaces bridge", "delete interfaces bridge br0"})
 }
 
 /*

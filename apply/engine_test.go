@@ -280,7 +280,7 @@ TC-APPLY-ENGINE-010
 Type: Negative
 Title: Executor failure after commit preserves applied
 Summary:
-Models a post-commit executor failure such as wrapper end failure.
+Models a post-commit executor failure such as session close failure.
 Apply should preserve the executor-reported Applied=true state.
 
 Validates:

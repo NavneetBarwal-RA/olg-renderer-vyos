@@ -8,7 +8,7 @@ Schemas are not fetched at runtime. They are checked in or generated/copied duri
 
 ```text
 schemas/
-  manifest.json
+  manifest.example.json
   ucentral/
     schema.json
     ucentral.schema.full.json
@@ -40,7 +40,7 @@ A snapshot of the target VyOS configuration schema.
 
 For MVP, this can be the manually prepared schema snapshot. Later, the VyOS build system should provide or generate this file for the exact target image.
 
-### `schemas/manifest.json`
+### `schemas/manifest.example.json`
 
 A small manifest recording schema names, versions, source refs, and hashes.
 

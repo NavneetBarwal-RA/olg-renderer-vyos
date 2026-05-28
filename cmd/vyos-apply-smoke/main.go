@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/routerarchitects/olg-renderer-vyos/apply"
@@ -16,7 +18,11 @@ import (
 const smokePrefix = "[smoke]"
 
 var defaultRequiredBinaries = []string{
-	"/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper",
+	"/usr/bin/cli-shell-api",
+	"/opt/vyatta/sbin/my_set",
+	"/opt/vyatta/sbin/my_delete",
+	"/opt/vyatta/sbin/my_commit",
+	"/opt/vyatta/sbin/my_discard",
 }
 
 type smokeConfig struct {
@@ -29,10 +35,16 @@ type smokeConfig struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, time.Now))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(runWithContext(ctx, os.Args[1:], os.Stdout, time.Now))
 }
 
 func run(args []string, out io.Writer, now func() time.Time) int {
+	return runWithContext(context.Background(), args, out, now)
+}
+
+func runWithContext(ctx context.Context, args []string, out io.Writer, now func() time.Time) int {
 	cfg, usage, err := parseFlags(args, out, now)
 	if err != nil {
 		logf(out, "error=%v", err)
@@ -47,7 +59,8 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 
 	logf(out, "starting VyOS apply smoke test")
 	logf(out, "warning: this modifies VyOS runtime configuration")
-	logf(out, "warning: normal apply policy may delete interfaces bridge and nat source")
+	logf(out, "warning: minimal-targeted deletes only interfaces bridge br0")
+	logf(out, "warning: minimal-managed uses normal policy and may delete interfaces bridge and nat source")
 
 	if !cfg.skipApply {
 		logf(out, "checking required binaries")
@@ -84,7 +97,11 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 	}
 
 	logf(out, "creating apply engine")
-	options := []apply.Option{}
+	options, err := applyOptionsForSmoke(cfg.mode, cfg.save)
+	if err != nil {
+		logf(out, "error=%v", err)
+		return 2
+	}
 	if cfg.save {
 		options = append(options, apply.WithSaveAfterCommit(true))
 	}
@@ -95,7 +112,7 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 	}
 
 	logf(out, "previewing plan with Prepare")
-	plan, err := applier.Prepare(context.Background(), input)
+	plan, err := applier.Prepare(ctx, input)
 	if err != nil {
 		logf(out, "prepare failed")
 		logf(out, "error=%v", err)
@@ -110,7 +127,7 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 	}
 
 	logf(out, "applying plan through Apply")
-	result, err := applier.Apply(context.Background(), input)
+	result, err := applier.Apply(ctx, input)
 	if err != nil {
 		logf(out, "apply failed")
 		logf(out, "error=%v", err)
@@ -127,7 +144,11 @@ func run(args []string, out io.Writer, now func() time.Time) int {
 }
 
 func requiredBinariesForSmoke(save bool) []string {
-	return append([]string(nil), defaultRequiredBinaries...)
+	required := append([]string(nil), defaultRequiredBinaries...)
+	if save {
+		required = append(required, "/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper")
+	}
+	return required
 }
 
 func parseFlags(args []string, out io.Writer, now func() time.Time) (smokeConfig, func(), error) {
@@ -137,7 +158,7 @@ func parseFlags(args []string, out io.Writer, now func() time.Time) (smokeConfig
 	fs.BoolVar(&cfg.confirmed, "i-understand-this-modifies-vyos", false, "required safety confirmation for lab VyOS modification")
 	fs.StringVar(&cfg.target, "target", "vyos", "apply target")
 	fs.StringVar(&cfg.configUUID, "config-uuid", defaultConfigUUID(now), "config UUID for smoke traceability")
-	fs.StringVar(&cfg.mode, "mode", "minimal", "smoke payload mode: minimal or bridge")
+	fs.StringVar(&cfg.mode, "mode", "minimal-targeted", "smoke payload mode: minimal-targeted or minimal-managed")
 	fs.BoolVar(&cfg.save, "save", false, "save configuration after successful commit")
 	fs.BoolVar(&cfg.skipApply, "skip-apply", false, "preview plan only; do not check VyOS binaries or call Apply")
 	usage := fs.Usage
@@ -163,10 +184,22 @@ func validateConfirmationFlag(confirmed bool) error {
 
 func buildSmokeCommands(mode string) ([]string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "minimal", "bridge":
+	case "", "minimal", "bridge", "minimal-targeted", "minimal-managed":
 		return []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}, nil
 	default:
-		return nil, fmt.Errorf("unsupported mode %q; expected minimal or bridge", mode)
+		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed", mode)
+	}
+}
+
+func applyOptionsForSmoke(mode string, save bool) ([]apply.Option, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case "", "minimal", "bridge", "minimal-targeted":
+		return []apply.Option{apply.WithResetPolicy(apply.ResetPolicy{ResetRoots: []string{"interfaces bridge br0"}})}, nil
+	case "minimal-managed":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed", mode)
 	}
 }
 
@@ -198,6 +231,8 @@ func logPlan(out io.Writer, plan apply.Plan) {
 
 func logResult(out io.Writer, result apply.Result) {
 	logf(out, "result applied=%t saved=%t", result.Applied, result.Saved)
+	logf(out, "delete_output=%s", trimForLog(result.DeleteOutput))
+	logf(out, "set_output=%s", trimForLog(result.SetOutput))
 	logf(out, "commit_output=%s", trimForLog(result.CommitOutput))
 	logf(out, "save_output=%s", trimForLog(result.SaveOutput))
 	logf(out, "discard_output=%s", trimForLog(result.DiscardOutput))
@@ -205,7 +240,8 @@ func logResult(out io.Writer, result apply.Result) {
 
 func logCleanupGuidance(out io.Writer) {
 	logf(out, "cleanup guidance:")
-	logf(out, "the smoke test uses normal apply policy and may delete interfaces bridge and nat source")
+	logf(out, "minimal-targeted deletes only interfaces bridge br0")
+	logf(out, "minimal-managed uses normal apply policy and may delete interfaces bridge and nat source")
 	logf(out, "run only on a disposable/lab VyOS VM or restore config from backup afterward")
 	logf(out, "preferred rollback is re-applying known-good desired config through the normal NATS agent path")
 }

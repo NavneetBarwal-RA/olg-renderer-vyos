@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	resetRootInterfacesBridge = "interfaces bridge"
-	resetRootNatSource        = "nat source"
+	resetRootInterfacesBridge    = "interfaces bridge"
+	resetRootInterfacesBridgeBr0 = "interfaces bridge br0"
+	resetRootNatSource           = "nat source"
 )
 
 // DefaultResetPolicy returns the MVP cloud-controlled reset roots.
@@ -43,7 +44,7 @@ func defaultResetRootList() []string {
 
 func isAllowedResetRoot(root string) bool {
 	switch root {
-	case resetRootInterfacesBridge, resetRootNatSource:
+	case resetRootInterfacesBridge, resetRootInterfacesBridgeBr0, resetRootNatSource:
 		return true
 	default:
 		return false

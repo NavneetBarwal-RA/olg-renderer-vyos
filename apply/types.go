@@ -27,6 +27,8 @@ type Result struct {
 	Saved          bool
 	DeleteCommands []string
 	SetCommands    []string
+	DeleteOutput   string
+	SetOutput      string
 	CommitOutput   string
 	SaveOutput     string
 	DiscardOutput  string
@@ -41,6 +43,8 @@ type ResetPolicy struct {
 type ExecutionResult struct {
 	Applied       bool
 	Saved         bool
+	DeleteOutput  string
+	SetOutput     string
 	CommitOutput  string
 	SaveOutput    string
 	DiscardOutput string

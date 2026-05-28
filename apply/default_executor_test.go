@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/routerarchitects/olg-renderer-vyos/internal/vyos"
 )
 
 type fakeVyosRunner struct {
@@ -15,34 +17,59 @@ type fakeVyosRunner struct {
 	afterCall          func(string)
 	contextCanceled    map[string]bool
 	contextHasDeadline map[string]bool
+	session            *fakeVyosSession
+	sessionIDs         map[string]int
+	nextSessionID      int
 }
 
-func (f *fakeVyosRunner) Begin(ctx context.Context) (string, error) {
-	return f.record(ctx, "begin")
+type fakeVyosSession struct {
+	owner *fakeVyosRunner
+	id    int
 }
 
-func (f *fakeVyosRunner) End(ctx context.Context) (string, error) {
-	return f.record(ctx, "end")
+func (f *fakeVyosRunner) Begin(ctx context.Context) (vyos.Session, error) {
+	if _, err := f.record(ctx, "begin", 0); err != nil {
+		return nil, err
+	}
+	if f.session == nil {
+		f.nextSessionID++
+		f.session = &fakeVyosSession{owner: f, id: f.nextSessionID}
+	}
+	return f.session, nil
 }
 
-func (f *fakeVyosRunner) RunConfigCommand(ctx context.Context, command string) (string, error) {
-	return f.record(ctx, "cmd:"+command)
+func (s *fakeVyosSession) Delete(ctx context.Context, command string) (string, error) {
+	return s.owner.record(ctx, "cmd:"+command, s.id)
 }
 
-func (f *fakeVyosRunner) Commit(ctx context.Context) (string, error) {
-	return f.record(ctx, "commit")
+func (s *fakeVyosSession) Set(ctx context.Context, command string) (string, error) {
+	return s.owner.record(ctx, "cmd:"+command, s.id)
 }
 
-func (f *fakeVyosRunner) Save(ctx context.Context) (string, error) {
-	return f.record(ctx, "save")
+func (s *fakeVyosSession) Commit(ctx context.Context) (string, error) {
+	return s.owner.record(ctx, "commit", s.id)
 }
 
-func (f *fakeVyosRunner) Discard(ctx context.Context) (string, error) {
-	return f.record(ctx, "discard")
+func (s *fakeVyosSession) Save(ctx context.Context) (string, error) {
+	return s.owner.record(ctx, "save", s.id)
 }
 
-func (f *fakeVyosRunner) record(ctx context.Context, call string) (string, error) {
+func (s *fakeVyosSession) Discard(ctx context.Context) (string, error) {
+	return s.owner.record(ctx, "discard", s.id)
+}
+
+func (s *fakeVyosSession) Close(ctx context.Context) (string, error) {
+	return s.owner.record(ctx, "end", s.id)
+}
+
+func (f *fakeVyosRunner) record(ctx context.Context, call string, sessionID int) (string, error) {
 	f.calls = append(f.calls, call)
+	if sessionID != 0 {
+		if f.sessionIDs == nil {
+			f.sessionIDs = map[string]int{}
+		}
+		f.sessionIDs[call] = sessionID
+	}
 	if f.contextCanceled == nil {
 		f.contextCanceled = map[string]bool{}
 	}
@@ -118,6 +145,11 @@ func TestDefaultExecutorUsesSessionLifecycleAndCommandOrder(t *testing.T) {
 		"commit",
 		"end",
 	})
+	for _, call := range runner.calls[1:] {
+		if runner.sessionIDs[call] != 1 {
+			t.Fatalf("call %q did not use first session instance: %#v", call, runner.sessionIDs)
+		}
+	}
 }
 
 /*
@@ -200,14 +232,14 @@ Validates:
 func TestDefaultExecutorDeleteFailureAttemptsDiscardAndEnd(t *testing.T) {
 	failCall := "cmd:delete interfaces bridge"
 	runner := &fakeVyosRunner{
-		outputs: map[string]string{"discard": "discard ok"},
+		outputs: map[string]string{failCall: "delete output", "discard": "discard ok"},
 		errors:  map[string]error{failCall: errors.New("delete failed")},
 	}
 	executor := newDefaultExecutorWithRunner(runner)
 
 	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeDeleteFailed)
-	if result.Applied || result.DiscardOutput != "discard ok" {
+	if result.Applied || result.DeleteOutput != "delete output" || result.DiscardOutput != "discard ok" {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 	assertStringSlicesEqual(t, runner.calls, []string{
@@ -233,11 +265,17 @@ Validates:
 */
 func TestDefaultExecutorSetFailureAttemptsDiscardAndEnd(t *testing.T) {
 	failCall := "cmd:set interfaces bridge br0 address dhcp"
-	runner := &fakeVyosRunner{errors: map[string]error{failCall: errors.New("set failed")}}
+	runner := &fakeVyosRunner{
+		outputs: map[string]string{failCall: "set output"},
+		errors:  map[string]error{failCall: errors.New("set failed")},
+	}
 	executor := newDefaultExecutorWithRunner(runner)
 
-	_, err := executor.Execute(context.Background(), executorTestPlan(false))
+	result, err := executor.Execute(context.Background(), executorTestPlan(false))
 	assertApplyCode(t, err, CodeSetFailed)
+	if result.SetOutput != "set output" {
+		t.Fatalf("set output was not preserved: %#v", result)
+	}
 	assertStringSlicesEqual(t, runner.calls, []string{
 		"begin",
 		"cmd:delete interfaces bridge",
@@ -498,5 +536,153 @@ func TestCleanupContextIsBounded(t *testing.T) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 || remaining > defaultCleanupTimeout {
 		t.Fatalf("cleanup deadline outside expected bound: %s", remaining)
+	}
+}
+
+/*
+TC-VYOS-SESSION-014
+Type: Positive
+Title: Missing delete paths are idempotent
+Summary:
+Simulates VyOS reporting that a managed-root delete target is absent.
+The executor should treat only known missing-node output as a non-fatal delete.
+
+Validates:
+  - Missing-node delete output does not fail apply
+  - Delete output remains visible for diagnostics
+  - Commit still runs
+*/
+func TestDefaultExecutorTreatsKnownMissingDeleteAsIdempotent(t *testing.T) {
+	failCall := "cmd:delete interfaces bridge"
+	runner := &fakeVyosRunner{
+		outputs: map[string]string{failCall: "Nothing to delete (the specified node does not exist)"},
+		errors:  map[string]error{failCall: errors.New("delete failed")},
+	}
+	executor := newDefaultExecutorWithRunner(runner)
+
+	result, err := executor.Execute(context.Background(), executorTestPlan(false))
+	assertNoApplyError(t, err)
+	if !result.Applied || !strings.Contains(result.DeleteOutput, "Nothing to delete") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	assertStringSlicesEqual(t, runner.calls, []string{
+		"begin",
+		"cmd:delete interfaces bridge",
+		"cmd:delete nat source",
+		"cmd:set interfaces bridge br0 address dhcp",
+		"cmd:set interfaces ethernet eth0 description 'WAN uplink'",
+		"commit",
+		"end",
+	})
+}
+
+/*
+TC-VYOS-SESSION-015
+Type: Negative
+Title: Unknown delete failures remain fatal
+Summary:
+Simulates a delete failure whose output does not match the known missing-node
+messages. The executor should not hide real delete failures.
+
+Validates:
+  - Unknown delete failure returns delete_failed
+  - Delete output is preserved
+  - Discard and close run
+*/
+func TestDefaultExecutorUnknownDeleteFailureStillFails(t *testing.T) {
+	failCall := "cmd:delete interfaces bridge"
+	runner := &fakeVyosRunner{
+		outputs: map[string]string{failCall: "permission denied"},
+		errors:  map[string]error{failCall: errors.New("delete failed")},
+	}
+	executor := newDefaultExecutorWithRunner(runner)
+
+	result, err := executor.Execute(context.Background(), executorTestPlan(false))
+	assertApplyCode(t, err, CodeDeleteFailed)
+	if result.Applied || result.DeleteOutput != "permission denied" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	assertStringSlicesEqual(t, runner.calls, []string{
+		"begin",
+		"cmd:delete interfaces bridge",
+		"discard",
+		"end",
+	})
+}
+
+type fakeApplyLocker struct {
+	calls       []string
+	lockErr     error
+	releaseErr  error
+	lockedAtBeg bool
+	locked      bool
+}
+
+func (l *fakeApplyLocker) Lock(ctx context.Context) (func() error, error) {
+	l.calls = append(l.calls, "lock")
+	if l.lockErr != nil {
+		return nil, l.lockErr
+	}
+	l.locked = true
+	return func() error {
+		l.calls = append(l.calls, "release")
+		l.locked = false
+		return l.releaseErr
+	}, nil
+}
+
+/*
+TC-VYOS-LOCK-001
+Type: Positive
+Title: Apply lock wraps the session
+Summary:
+Verifies the executor acquires its local apply lock before beginning a VyOS
+session and releases it after cleanup.
+
+Validates:
+  - Lock is acquired before Begin
+  - Lock remains held during Begin
+  - Lock is released after success
+*/
+func TestDefaultExecutorAcquiresAndReleasesApplyLock(t *testing.T) {
+	locker := &fakeApplyLocker{}
+	runner := &fakeVyosRunner{}
+	runner.afterCall = func(call string) {
+		if call == "begin" {
+			locker.lockedAtBeg = locker.locked
+		}
+	}
+	executor := newDefaultExecutorWithRunnerAndLocker(runner, locker)
+
+	_, err := executor.Execute(context.Background(), executorTestPlan(false))
+	assertNoApplyError(t, err)
+	assertStringSlicesEqual(t, locker.calls, []string{"lock", "release"})
+	if !locker.lockedAtBeg || locker.locked {
+		t.Fatalf("lock did not wrap session: %#v", locker)
+	}
+}
+
+/*
+TC-VYOS-LOCK-002
+Type: Negative
+Title: Apply lock failure avoids Begin
+Summary:
+Forces lock acquisition to fail.
+The executor should return executor_failed and never begin a session.
+
+Validates:
+  - Lock failure returns executor_failed
+  - Begin is not called
+*/
+func TestDefaultExecutorLockFailureAvoidsBegin(t *testing.T) {
+	locker := &fakeApplyLocker{lockErr: errors.New("locked")}
+	runner := &fakeVyosRunner{}
+	executor := newDefaultExecutorWithRunnerAndLocker(runner, locker)
+
+	_, err := executor.Execute(context.Background(), executorTestPlan(false))
+	assertApplyCode(t, err, CodeExecutorFailed)
+	assertStringSlicesEqual(t, locker.calls, []string{"lock"})
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner called after lock failure: %#v", runner.calls)
 	}
 }

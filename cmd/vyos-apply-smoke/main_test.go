@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,8 +21,8 @@ Builds smoke payload commands for supported modes and an unsupported mode.
 The helper must keep defaults small and reject unknown mode values before apply.
 
 Validates:
-  - minimal mode returns a bridge description command
-  - bridge mode returns the validated bridge command
+  - minimal-targeted mode returns a bridge description command
+  - minimal-managed mode returns the same validated bridge command
   - unsupported modes are rejected
 */
 func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
@@ -29,8 +30,8 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 		mode string
 		want []string
 	}{
-		{mode: "minimal", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
-		{mode: "bridge", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "minimal-targeted", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "minimal-managed", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
 	}
 
 	for _, test := range tests {
@@ -68,7 +69,7 @@ func TestBuildSmokeCommandsRejectsNatMode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected unsupported mode error")
 	}
-	if !strings.Contains(err.Error(), "minimal or bridge") {
+	if !strings.Contains(err.Error(), "minimal-targeted or minimal-managed") {
 		t.Fatalf("unexpected nat mode error: %v", err)
 	}
 }
@@ -110,7 +111,7 @@ Validates:
 */
 func TestCheckRequiredBinariesUsesInjectedPaths(t *testing.T) {
 	dir := t.TempDir()
-	executable := filepath.Join(dir, "fake-vyatta-cfg-cmd-wrapper")
+	executable := filepath.Join(dir, "fake-cli-shell-api")
 	notExecutable := filepath.Join(dir, "fake-not-executable")
 
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0755); err != nil {
@@ -137,17 +138,27 @@ Type: Positive
 Title: Required binaries use wrapper for save modes
 Summary:
 Builds the smoke binary list for save disabled and save enabled.
-Both modes should require only the modern generic config wrapper.
+Save=false should require only the documented CLI Shell API session binaries.
+Save=true additionally requires the generic wrapper used for save.
 
 Validates:
-  - save=false requires vyatta-cfg-cmd-wrapper
-  - save=true requires vyatta-cfg-cmd-wrapper
+  - save=false requires cli-shell-api and my_* helpers
+  - save=true also requires vyatta-cfg-cmd-wrapper
   - No legacy save helper is required
 */
-func TestRequiredBinariesForSmokeUsesWrapperForSaveModes(t *testing.T) {
+func TestRequiredBinariesForSmokeUsesSessionBinariesForSaveModes(t *testing.T) {
 	for _, save := range []bool{false, true} {
 		got := requiredBinariesForSmoke(save)
-		want := []string{"/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper"}
+		want := []string{
+			"/usr/bin/cli-shell-api",
+			"/opt/vyatta/sbin/my_set",
+			"/opt/vyatta/sbin/my_delete",
+			"/opt/vyatta/sbin/my_commit",
+			"/opt/vyatta/sbin/my_discard",
+		}
+		if save {
+			want = append(want, "/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper")
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("unexpected required binaries for save=%t:\n got: %#v\nwant: %#v", save, got, want)
 		}
@@ -213,7 +224,7 @@ func TestRunSkipApplyPreviewsWithoutRealBinaries(t *testing.T) {
 	code := run([]string{
 		"--i-understand-this-modifies-vyos",
 		"--skip-apply",
-		"--mode", "minimal",
+		"--mode", "minimal-targeted",
 	}, &out, func() time.Time {
 		return time.Date(2026, 5, 26, 1, 2, 3, 0, time.UTC)
 	})
@@ -224,12 +235,59 @@ func TestRunSkipApplyPreviewsWithoutRealBinaries(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"[smoke] skip_apply=true; skipping required binary checks and Apply",
-		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z",
+		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z mode=minimal-targeted",
 		"[smoke] previewing plan with Prepare",
+		"[smoke] delete[0]=delete interfaces bridge br0",
 		"[smoke] completed preview without Apply",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected log %q in:\n%s", want, got)
 		}
 	}
+}
+
+func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
+	options, err := applyOptionsForSmoke("minimal-targeted", false)
+	if err != nil {
+		t.Fatalf("applyOptionsForSmoke: %v", err)
+	}
+	engine, err := apply.New(options...)
+	if err != nil {
+		t.Fatalf("new apply engine: %v", err)
+	}
+	plan, err := engine.Prepare(testContext(), apply.Input{
+		Target:          "vyos",
+		ConfigUUID:      "cfg-123",
+		DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge br0"}) {
+		t.Fatalf("unexpected targeted deletes: %#v", plan.DeleteCommands)
+	}
+
+	options, err = applyOptionsForSmoke("minimal-managed", false)
+	if err != nil {
+		t.Fatalf("applyOptionsForSmoke managed: %v", err)
+	}
+	engine, err = apply.New(options...)
+	if err != nil {
+		t.Fatalf("new managed apply engine: %v", err)
+	}
+	plan, err = engine.Prepare(testContext(), apply.Input{
+		Target:          "vyos",
+		ConfigUUID:      "cfg-123",
+		DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
+	})
+	if err != nil {
+		t.Fatalf("prepare managed: %v", err)
+	}
+	if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge", "delete nat source"}) {
+		t.Fatalf("unexpected managed deletes: %#v", plan.DeleteCommands)
+	}
+}
+
+func testContext() context.Context {
+	return context.Background()
 }

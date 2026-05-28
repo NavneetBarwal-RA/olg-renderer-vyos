@@ -13,10 +13,11 @@
 // Prepare validates input and returns a non-executing Plan. Apply is the
 // production execution API: it uses the same preparation logic, calls the default
 // controlled VyOS executor with structured delete and set command slices,
-// enters a VyOS configuration session with vyatta-cfg-cmd-wrapper begin/end,
-// mutates config through wrapper delete/set/commit/discard, and saves through
-// wrapper save only when configured. ConfigUUID is traceability metadata only;
-// the package never uses it for duplicate detection or applied-state comparison.
+// enters one persistent VyOS CLI Shell API session, mutates config through
+// my_delete/my_set/my_commit, discards on failure, tears down the session, and
+// saves through wrapper save only when configured. ConfigUUID is traceability
+// metadata only; the package never uses it for duplicate detection or
+// applied-state comparison.
 //
 // WithExecutor is available for tests and advanced controlled integrations, but
 // custom executors can bypass runtime execution safety if implemented

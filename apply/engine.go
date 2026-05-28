@@ -108,6 +108,8 @@ func resultFromExecution(plan Plan, execResult ExecutionResult) Result {
 	result := resultFromPlan(plan)
 	result.Applied = execResult.Applied
 	result.Saved = plan.Save && execResult.Saved
+	result.DeleteOutput = execResult.DeleteOutput
+	result.SetOutput = execResult.SetOutput
 	result.CommitOutput = execResult.CommitOutput
 	result.SaveOutput = execResult.SaveOutput
 	result.DiscardOutput = execResult.DiscardOutput

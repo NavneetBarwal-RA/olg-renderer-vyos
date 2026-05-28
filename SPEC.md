@@ -54,7 +54,7 @@ The apply engine must be:
 - independent of NATS
 - testable without real VyOS
 - commit-only by default
-- directly executable through its default VyOS wrapper executor
+- directly executable through its default persistent VyOS session executor
 - able to remove stale cloud-owned config without old-vs-new diff logic
 - simple enough to implement as one coherent MVP change
 ```
@@ -141,7 +141,7 @@ internal/templates/
   renderer templates
 
 internal/vyos/
-  controlled VyOS wrapper runner used by the default apply executor
+  controlled VyOS session runner used by the default apply executor
 ```
 
 The public packages should expose stable APIs. Internal packages can evolve as needed.
@@ -913,13 +913,14 @@ Apply must:
 
 ```text
 - perform the same validation and plan preparation as Prepare
-- use /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper as the generic VyOS config command executor
-- begin a configuration session
+- acquire the local agent apply lock
+- open one persistent VyOS CLI Shell API configuration session
 - execute delete commands for managed roots
 - execute desired set commands
 - commit the candidate configuration
 - run save through vyatta-cfg-cmd-wrapper only when save=true
-- end the session and discard candidate config on failure where possible
+- discard candidate config on failure where possible
+- teardown the session and release the apply lock
 - return structured Result
 ```
 
@@ -965,6 +966,8 @@ type Result struct {
     Saved          bool
     DeleteCommands []string
     SetCommands    []string
+    DeleteOutput   string
+    SetOutput      string
     CommitOutput   string
     SaveOutput     string
     DiscardOutput  string
@@ -1017,22 +1020,26 @@ Rationale:
 - managed-root deletion removes stale cloud-owned sections while preserving unmanaged roots
 ```
 
-Execution must use one candidate configuration transaction:
+Execution must use one persistent CLI Shell API candidate configuration session:
 
 ```text
-vyatta-cfg-cmd-wrapper begin
-  vyatta-cfg-cmd-wrapper delete managed roots
-  vyatta-cfg-cmd-wrapper set rendered desired commands
-  vyatta-cfg-cmd-wrapper commit
+acquire /run/lock/olg-vyos-apply.lock
+cli-shell-api getSessionEnv <apply-process-id>
+cli-shell-api setupSession
+  my_delete managed roots
+  my_set rendered desired commands
+  my_commit
   optional vyatta-cfg-cmd-wrapper save
-vyatta-cfg-cmd-wrapper end
+  my_discard on failure before commit
+cli-shell-api teardownSession
+release /run/lock/olg-vyos-apply.lock
 ```
 
 Do not commit after delete and before set.
 
 `apply.New()` constructs an engine with the default internal VyOS session executor. `WithExecutor(...)` remains available for tests and advanced controlled integrations, but `olg-server-vyos-client-natagent` should normally call `apply.New()` and then `Apply()` directly.
 
-The default executor assumes the modern `vyatta-cfg-cmd-wrapper` model matches the target image. This transaction/session behavior must be validated on the deployed VyOS version or image before production rollout.
+The default session identifier is the apply process ID. The default executor must not run independent stateless wrapper `begin`, `delete`, `set`, `commit`, and `end` calls after opening a session. It must reuse the session environment returned by `getSessionEnv` for every operation. This transaction/session behavior must be validated on the deployed VyOS version or image before production rollout.
 
 ---
 
@@ -1324,13 +1331,15 @@ type Executor interface {
 Executor responsibilities:
 
 ```text
-- initialize VyOS config session with wrapper begin
+- acquire local apply lock
+- initialize one VyOS CLI Shell API config session
 - apply delete commands
 - apply set commands
-- commit with wrapper commit
+- commit with my_commit
 - optionally save with wrapper save if configured
 - discard candidate config on failure where possible
-- always run wrapper end after begin
+- always run cli-shell-api teardownSession after setup
+- release local apply lock
 ```
 
 Executor safety requirements:
@@ -1356,14 +1365,16 @@ Default executor:
 apply.New()
   -> default internal VyOS session executor
   -> internal/vyos runner
-  -> vyatta-cfg-cmd-wrapper begin/delete/set/commit/end
+  -> cli-shell-api getSessionEnv/setupSession
+  -> my_delete/my_set/my_commit
   -> optional vyatta-cfg-cmd-wrapper save
-  -> vyatta-cfg-cmd-wrapper discard on failure
+  -> my_discard on failure
+  -> cli-shell-api teardownSession
 ```
 
-The default runner invokes `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` with argv boundaries for begin, delete, set, commit, optional save, discard, and end. It must not rely on PATH lookup, use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
+The default runner invokes `/usr/bin/cli-shell-api` for session setup/teardown, `/opt/vyatta/sbin/my_delete`, `/opt/vyatta/sbin/my_set`, `/opt/vyatta/sbin/my_commit`, `/opt/vyatta/sbin/my_discard`, and `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper save` with argv boundaries. It must reuse the session environment returned by `getSessionEnv`. It must not rely on PATH lookup, use `sh -c`, concatenate rendered commands into a shell string, or expose generic raw public APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`.
 
-`internal/vyos.RunConfigCommand` is not a generic command runner. It must only receive commands from a validated `apply.Plan`, and it includes last-resort guards that reject empty commands, newlines, obvious shell/control metacharacters, and operations other than `set` or `delete`.
+`internal/vyos` is not a generic command runner. It must only receive commands from a validated `apply.Plan`, and it includes last-resort guards that reject empty commands, newlines, obvious shell/control metacharacters, and operations other than `set` or `delete`.
 
 `WithExecutor(...)` is for tests and advanced controlled integrations. Custom executors receive validated `Plan` data, but can bypass runtime execution safety if implemented incorrectly; they must preserve command boundaries and must not expose arbitrary command execution.
 
@@ -1391,7 +1402,7 @@ fake VyOS runner records default executor operations
 Real executor:
 
 ```text
-internal/vyos runner performs local non-interactive VyOS wrapper operations
+internal/vyos runner performs local non-interactive VyOS session operations
 ```
 
 Unit tests must not require real VyOS.
@@ -1837,7 +1848,7 @@ Required:
 - unmanaged roots are not deleted
 - commit failure returns typed error and attempts discard
 - save disabled by default
-- apply.New installs the default VyOS wrapper executor
+- apply.New installs the default persistent VyOS session executor
 - WithExecutor(fake) overrides the default executor for tests
 - default executor runs begin, deletes, sets, commit, optional save, and end in order
 - default executor attempts discard on delete, set, and commit failure
@@ -1864,7 +1875,7 @@ This repository includes a manual smoke command:
 ```bash
 ~/vyos-apply-smoke \
   --i-understand-this-modifies-vyos \
-  --mode minimal \
+  --mode minimal-targeted \
   --save=false
 ```
 
@@ -1873,7 +1884,7 @@ Preview without applying:
 ```bash
 ~/vyos-apply-smoke \
   --i-understand-this-modifies-vyos \
-  --mode minimal \
+  --mode minimal-targeted \
   --skip-apply
 ```
 
@@ -1895,9 +1906,13 @@ Expected output excerpt:
 ```text
 [smoke] starting VyOS apply smoke test
 [smoke] checking required binaries
-[smoke] found /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper
+[smoke] found /usr/bin/cli-shell-api
+[smoke] found /opt/vyatta/sbin/my_set
+[smoke] found /opt/vyatta/sbin/my_delete
+[smoke] found /opt/vyatta/sbin/my_commit
+[smoke] found /opt/vyatta/sbin/my_discard
 [smoke] previewing plan with Prepare
-[smoke] plan delete_count=2 set_count=1 commit=true save=false
+[smoke] plan delete_count=1 set_count=1 commit=true save=false
 [smoke] applying plan through Apply
 [smoke] result applied=true saved=false
 [smoke] completed successfully
@@ -1906,14 +1921,13 @@ Expected output excerpt:
 Smoke result interpretation:
 
 ```text
-delete interfaces bridge
-delete nat source
+delete interfaces bridge br0
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
 commit=true
 save=false
 ```
 
-This means the apply engine will replace only managed roots. `interfaces bridge` is managed and therefore deleted/recreated. `nat source` is managed and therefore deleted/recreated. All other VyOS config remains untouched unless it is under a managed root. Manual changes under `interfaces bridge`, such as changing `br0` description, are expected to be overwritten on the next apply.
+This means the smoke command will replace only the targeted smoke node `interfaces bridge br0`. All other VyOS config remains untouched unless it is under that targeted smoke path. Use `--mode minimal-managed` to exercise the normal managed-root policy, which emits `delete interfaces bridge` and `delete nat source`. Manual changes under `interfaces bridge br0`, such as changing the description, are expected to be overwritten on the next targeted smoke apply.
 
 Expected verification commands:
 
@@ -1940,7 +1954,8 @@ set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
 Cleanup guidance:
 
 ```text
-- The smoke command may delete interfaces bridge and nat source through normal apply policy.
+- The default smoke mode deletes only interfaces bridge br0.
+- The minimal-managed smoke mode may delete interfaces bridge and nat source through normal apply policy.
 - Run only on a disposable/lab VyOS VM or router.
 - Restore with known-good desired config through the normal NATS agent path, a lab snapshot/backup, or console recovery.
 ```
@@ -1954,7 +1969,7 @@ commit
 exit
 ```
 
-Fake executor and fake runner tests remain required because a real smoke run validates only one image and cannot deterministically cover parser rejection, reset policy guards, command ordering, discard failure, save failure, end failure, context cancellation, or wrapper command behavior.
+Fake executor and fake runner tests remain required because a real smoke run validates only one image and cannot deterministically cover parser rejection, reset policy guards, command ordering, discard failure, save failure, close failure, context cancellation, session environment reuse, or command-boundary behavior.
 
 ---
 
