@@ -21,9 +21,10 @@ Builds smoke payload commands for supported modes and an unsupported mode.
 The helper must keep defaults small and reject unknown mode values before apply.
 
 Validates:
-  - minimal and bridge aliases return a bridge description command
-  - minimal-targeted mode returns a bridge description command
-  - minimal-managed mode returns the same validated bridge command
+  - minimal and bridge aliases return bridge-only commands
+  - minimal-targeted mode returns bridge-only commands
+  - minimal-managed mode returns the same validated bridge-only commands
+  - Smoke commands do not set ethernet description
   - unsupported modes are rejected
 */
 func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
@@ -31,10 +32,10 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 		mode string
 		want []string
 	}{
-		{mode: "minimal", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
-		{mode: "bridge", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
-		{mode: "minimal-targeted", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
-		{mode: "minimal-managed", want: []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}},
+		{mode: "minimal", want: expectedSmokeCommands()},
+		{mode: "bridge", want: expectedSmokeCommands()},
+		{mode: "minimal-targeted", want: expectedSmokeCommands()},
+		{mode: "minimal-managed", want: expectedSmokeCommands()},
 	}
 
 	for _, test := range tests {
@@ -44,6 +45,11 @@ func TestBuildSmokeCommandsSelectsSupportedModes(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, test.want) {
 			t.Fatalf("unexpected commands for %q:\n got: %#v\nwant: %#v", test.mode, got, test.want)
+		}
+		for _, command := range got {
+			if strings.Contains(command, "interfaces ethernet") {
+				t.Fatalf("smoke command should not change ethernet config for %q: %q", test.mode, command)
+			}
 		}
 	}
 
@@ -190,7 +196,7 @@ func TestLogPlanIncludesCountsAndCommands(t *testing.T) {
 	var out strings.Builder
 	plan := apply.Plan{
 		DeleteCommands: []string{"delete interfaces bridge br0"},
-		SetCommands:    []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"},
+		SetCommands:    expectedSmokeCommands(),
 		Commit:         true,
 		Save:           false,
 	}
@@ -198,9 +204,11 @@ func TestLogPlanIncludesCountsAndCommands(t *testing.T) {
 	logPlan(&out, plan)
 	got := out.String()
 	for _, want := range []string{
-		"[smoke] plan delete_count=1 set_count=1 commit=true save=false",
+		"[smoke] plan delete_count=1 set_count=3 commit=true save=false",
 		"[smoke] delete[0]=delete interfaces bridge br0",
-		"[smoke] set[0]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+		"[smoke] set[0]=set interfaces bridge br0 address dhcp",
+		"[smoke] set[1]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+		"[smoke] set[2]=set interfaces bridge br0 member interface eth0",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected log %q in:\n%s", want, got)
@@ -240,11 +248,49 @@ func TestRunSkipApplyPreviewsWithoutRealBinaries(t *testing.T) {
 		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z mode=minimal-targeted",
 		"[smoke] previewing plan with Prepare",
 		"[smoke] delete[0]=delete interfaces bridge br0",
+		"[smoke] set[0]=set interfaces bridge br0 address dhcp",
+		"[smoke] set[1]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+		"[smoke] set[2]=set interfaces bridge br0 member interface eth0",
 		"[smoke] completed preview without Apply",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected log %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "set interfaces ethernet eth0 description") {
+		t.Fatalf("minimal-targeted smoke output should not include ethernet config:\n%s", got)
+	}
+}
+
+func TestRunSkipApplyManagedModePreviewsManagedDeletesAndBridgeOnlySets(t *testing.T) {
+	var out strings.Builder
+	code := run([]string{
+		"--i-understand-this-modifies-vyos",
+		"--skip-apply",
+		"--mode", "minimal-managed",
+	}, &out, func() time.Time {
+		return time.Date(2026, 5, 26, 1, 2, 3, 0, time.UTC)
+	})
+
+	if code != 0 {
+		t.Fatalf("unexpected exit code %d:\n%s", code, out.String())
+	}
+	got := out.String()
+	for _, want := range []string{
+		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z mode=minimal-managed",
+		"[smoke] plan delete_count=2 set_count=3 commit=true save=false",
+		"[smoke] delete[0]=delete interfaces bridge",
+		"[smoke] delete[1]=delete nat source",
+		"[smoke] set[0]=set interfaces bridge br0 address dhcp",
+		"[smoke] set[1]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+		"[smoke] set[2]=set interfaces bridge br0 member interface eth0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected log %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "set interfaces ethernet eth0 description") {
+		t.Fatalf("minimal-managed smoke output should not include ethernet config:\n%s", got)
 	}
 }
 
@@ -261,7 +307,7 @@ func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
 		plan, err := engine.Prepare(testContext(), apply.Input{
 			Target:          "vyos",
 			ConfigUUID:      "cfg-123",
-			DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
+			DesiredCommands: strings.Join(expectedSmokeCommands(), "\n") + "\n",
 		})
 		if err != nil {
 			t.Fatalf("prepare for %q: %v", mode, err)
@@ -282,7 +328,7 @@ func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
 	plan, err := engine.Prepare(testContext(), apply.Input{
 		Target:          "vyos",
 		ConfigUUID:      "cfg-123",
-		DesiredCommands: "set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'\n",
+		DesiredCommands: strings.Join(expectedSmokeCommands(), "\n") + "\n",
 	})
 	if err != nil {
 		t.Fatalf("prepare managed: %v", err)
@@ -294,4 +340,12 @@ func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
 
 func testContext() context.Context {
 	return context.Background()
+}
+
+func expectedSmokeCommands() []string {
+	return []string{
+		"set interfaces bridge br0 address dhcp",
+		"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
+		"set interfaces bridge br0 member interface eth0",
+	}
 }

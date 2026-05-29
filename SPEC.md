@@ -1920,7 +1920,7 @@ Expected output excerpt:
 [smoke] found /opt/vyatta/sbin/my_commit
 [smoke] found /opt/vyatta/sbin/my_discard
 [smoke] previewing plan with Prepare
-[smoke] plan delete_count=1 set_count=1 commit=true save=false
+[smoke] plan delete_count=1 set_count=3 commit=true save=false
 [smoke] applying plan through Apply
 [smoke] result applied=true saved=false
 [smoke] completed successfully
@@ -1930,19 +1930,24 @@ Smoke result interpretation:
 
 ```text
 delete interfaces bridge br0
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 commit=true
 save=false
 ```
 
-This means the smoke command will replace only the targeted smoke node `interfaces bridge br0`. All other VyOS config remains untouched unless it is under that targeted smoke path. Use `--mode minimal-managed` to exercise the normal managed-root policy, which emits `delete interfaces bridge` and `delete nat source`. Manual changes under `interfaces bridge br0`, such as changing the description, are expected to be overwritten on the next targeted smoke apply.
+This means the smoke command will replace only the targeted smoke node `interfaces bridge br0`, then recreate it with DHCP, the smoke description, and `eth0` membership. All other VyOS config remains untouched unless it is under that targeted smoke path. The smoke payload intentionally does not change `interfaces ethernet eth0`. Use `--mode minimal-managed` to exercise the normal managed-root policy, which emits `delete interfaces bridge` and `delete nat source`. Manual changes under `interfaces bridge br0`, such as changing the description, are expected to be overwritten on the next targeted smoke apply.
 
 Expected verification commands:
 
 ```bash
 show configuration commands | match "interfaces bridge"
 show configuration commands | match "OLG_APPLY_SMOKE_TEST"
+show configuration commands | match "interfaces ethernet eth0 description"
 ```
+
+The ethernet description should remain whatever it was before the smoke test.
 
 Manual mutation test:
 
@@ -1956,15 +1961,18 @@ exit
 Rerun smoke and verify it returns to:
 
 ```text
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 ```
 
 Cleanup guidance:
 
 ```text
-- The default smoke mode deletes only interfaces bridge br0.
+- The default smoke mode deletes and recreates interfaces bridge br0 with DHCP and eth0 membership.
 - The minimal-managed smoke mode may delete interfaces bridge and nat source through normal apply policy.
 - Run only on a disposable/lab VyOS VM or router.
+- Management networking can briefly flap during commit; prefer console access.
 - Restore with known-good desired config through the normal NATS agent path, a lab snapshot/backup, or console recovery.
 ```
 

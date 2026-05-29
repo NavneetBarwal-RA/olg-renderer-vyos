@@ -20,11 +20,13 @@ It is not part of CI and it is not a replacement for the fake executor and fake 
 
 This command modifies VyOS runtime configuration when `--skip-apply=false`.
 
-The default smoke mode is `minimal-targeted`, which deletes only:
+The default smoke mode is `minimal-targeted`, which deletes and recreates:
 
 ```text
 interfaces bridge br0
 ```
+
+It recreates `br0` with DHCP, adds `eth0` as a bridge member, and sets the smoke description. Even though the final config recreates `br0`, the commit can briefly flap management networking. Prefer console access or a disposable VM.
 
 The `minimal-managed` smoke mode uses the normal managed-root reconciliation policy and may delete and recreate these managed roots:
 
@@ -78,8 +80,8 @@ Run this only on a lab VyOS target:
 Optional modes:
 
 ```text
-minimal-targeted  delete interfaces bridge br0, then set the smoke description
-minimal-managed   normal managed-root policy, then set the smoke description
+minimal-targeted  delete interfaces bridge br0, then recreate br0 with DHCP and eth0 membership
+minimal-managed   normal managed-root policy, then recreate br0 with DHCP and eth0 membership
 minimal           compatibility alias for minimal-targeted
 bridge            compatibility alias for minimal-targeted
 ```
@@ -102,12 +104,16 @@ bridge            compatibility alias for minimal-targeted
 [smoke] building apply input
 [smoke] target=vyos config_uuid=smoke-20260526T010203Z mode=minimal-targeted save=false skip_apply=false
 [smoke] desired commands:
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 [smoke] creating apply engine
 [smoke] previewing plan with Prepare
-[smoke] plan delete_count=1 set_count=1 commit=true save=false
+[smoke] plan delete_count=1 set_count=3 commit=true save=false
 [smoke] delete[0]=delete interfaces bridge br0
-[smoke] set[0]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+[smoke] set[0]=set interfaces bridge br0 address dhcp
+[smoke] set[1]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+[smoke] set[2]=set interfaces bridge br0 member interface eth0
 [smoke] applying plan through Apply
 [smoke] result applied=true saved=false
 [smoke] delete_output=<empty>
@@ -126,7 +132,9 @@ The default minimal-targeted preview plan:
 
 ```text
 delete interfaces bridge br0
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 commit=true
 save=false
 ```
@@ -135,7 +143,7 @@ means:
 
 ```text
 - the smoke command will replace only the targeted smoke bridge node
-- interfaces bridge br0 is deleted/recreated
+- interfaces bridge br0 is deleted/recreated with DHCP and eth0 membership
 - nat source is not touched by the default smoke mode
 - all other VyOS config remains untouched unless it is under the targeted smoke path
 ```
@@ -145,24 +153,31 @@ After a successful runtime-only smoke apply on VyOS rolling, expected config inc
 ```text
 interfaces {
     bridge br0 {
+        address dhcp
         description OLG_APPLY_SMOKE_TEST
+        member {
+            interface eth0 {
+            }
+        }
     }
 }
 ```
 
-Manual changes under `interfaces bridge br0` are expected to be overwritten on next targeted smoke apply because that node is reset by the smoke policy.
+Manual changes under `interfaces bridge br0` are expected to be overwritten on next targeted smoke apply because that node is reset by the smoke policy. The smoke test intentionally does not change `interfaces ethernet eth0`.
 
 The managed-root smoke mode preview:
 
 ```text
 delete interfaces bridge
 delete nat source
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 commit=true
 save=false
 ```
 
-means the normal apply policy will replace only managed roots. `interfaces bridge` is managed and therefore deleted/recreated. `nat source` is managed and therefore deleted/recreated. All other VyOS config remains untouched unless it is under a managed root.
+means the normal apply policy will replace only managed roots. `interfaces bridge` is managed and therefore deleted/recreated, and the smoke payload recreates `br0` with DHCP and eth0 membership. `nat source` is managed and therefore deleted/recreated. All other VyOS config remains untouched unless it is under a managed root.
 
 This is safer than whole-device reconciliation for the current phase. The smoke test does not delete everything except a preserve whitelist; it deletes only declared managed roots. A future full-device reconciliation mode would need to be separate, explicit, and protected by stronger safeguards because an incomplete preserve list could remove SSH, login, WAN, NTP, or system configuration.
 
@@ -191,7 +206,10 @@ Verify:
 ```bash
 show configuration commands | match "interfaces bridge"
 show configuration commands | match "OLG_APPLY_SMOKE_TEST"
+show configuration commands | match "interfaces ethernet eth0 description"
 ```
+
+The ethernet description should remain whatever it was before the smoke test.
 
 Manual mutation test:
 
@@ -202,10 +220,12 @@ commit
 exit
 ```
 
-Rerun the smoke apply and verify the bridge description returns to:
+Rerun the smoke apply and verify the bridge config returns to:
 
 ```text
+set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
 ```
 
 ## Cleanup And Rollback

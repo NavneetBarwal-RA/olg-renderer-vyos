@@ -15,7 +15,12 @@ import (
 	"github.com/routerarchitects/olg-renderer-vyos/apply"
 )
 
-const smokePrefix = "[smoke]"
+const (
+	smokePrefix            = "[smoke]"
+	smokeBridgeName        = "br0"
+	smokeBridgeMember      = "eth0"
+	smokeBridgeDescription = "OLG_APPLY_SMOKE_TEST"
+)
 
 var defaultRequiredBinaries = []string{
 	"/usr/bin/cli-shell-api",
@@ -59,8 +64,8 @@ func runWithContext(ctx context.Context, args []string, out io.Writer, now func(
 
 	logf(out, "starting VyOS apply smoke test")
 	logf(out, "warning: this modifies VyOS runtime configuration")
-	logf(out, "warning: minimal-targeted deletes only interfaces bridge br0")
-	logf(out, "warning: minimal-managed uses normal policy and may delete interfaces bridge and nat source")
+	logf(out, "warning: minimal-targeted deletes and recreates interfaces bridge %s with DHCP and %s membership; networking may briefly flap", smokeBridgeName, smokeBridgeMember)
+	logf(out, "warning: minimal-managed uses normal policy and may delete interfaces bridge and nat source; networking may briefly flap")
 
 	if !cfg.skipApply {
 		logf(out, "checking required binaries")
@@ -185,7 +190,11 @@ func validateConfirmationFlag(confirmed bool) error {
 func buildSmokeCommands(mode string) ([]string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "minimal", "bridge", "minimal-targeted", "minimal-managed":
-		return []string{"set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'"}, nil
+		return []string{
+			fmt.Sprintf("set interfaces bridge %s address dhcp", smokeBridgeName),
+			fmt.Sprintf("set interfaces bridge %s description '%s'", smokeBridgeName, smokeBridgeDescription),
+			fmt.Sprintf("set interfaces bridge %s member interface %s", smokeBridgeName, smokeBridgeMember),
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported mode %q; expected minimal-targeted or minimal-managed; minimal and bridge alias minimal-targeted", mode)
 	}
@@ -240,7 +249,7 @@ func logResult(out io.Writer, result apply.Result) {
 
 func logCleanupGuidance(out io.Writer) {
 	logf(out, "cleanup guidance:")
-	logf(out, "minimal-targeted deletes only interfaces bridge br0")
+	logf(out, "minimal-targeted deletes and recreates interfaces bridge %s with DHCP and %s membership", smokeBridgeName, smokeBridgeMember)
 	logf(out, "minimal-managed uses normal apply policy and may delete interfaces bridge and nat source")
 	logf(out, "run only on a disposable/lab VyOS VM or restore config from backup afterward")
 	logf(out, "preferred rollback is re-applying known-good desired config through the normal NATS agent path")
