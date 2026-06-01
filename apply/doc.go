@@ -4,11 +4,12 @@
 //
 // The MVP managed-root strategy deletes only explicit cloud-controlled managed
 // roots, then applies the validated rendered set commands and commits once. The
-// default managed roots are "interfaces bridge" and "nat source". Roots such as
-// system, service, users, protocols, container, broad interfaces, and interfaces
-// ethernet are preserved from broad deletion by omission from the reset policy.
-// Specific unmanaged-root commands may still be allowlisted, such as renderer
-// emitted ethernet description commands.
+// default managed roots are "interfaces bridge", "nat source",
+// "service dhcp-server", and "service dns forwarding". Roots such as system,
+// broad service, service ssh, users, protocols, container, broad interfaces,
+// and interfaces ethernet are preserved from broad deletion by omission from
+// the reset policy. Specific unmanaged-root commands may still be allowlisted,
+// such as renderer emitted ethernet description and SSH port commands.
 //
 // Prepare validates input and returns a non-executing Plan. Apply is the
 // production execution API: it uses the same preparation logic, calls the default

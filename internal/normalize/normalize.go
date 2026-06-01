@@ -48,6 +48,7 @@ func newError(code, msg string, err error) *Error {
 type RenderData struct {
 	Interfaces InterfacesSection
 	NAT        NATSection
+	Services   ServiceSection
 }
 
 // InterfacesSection contains normalized interface render data.
@@ -62,7 +63,6 @@ type Bridge struct {
 	Address          string
 	Description      string
 	MemberInterfaces []string
-	EnableVLAN       bool
 	VIFs             []VIF
 }
 
@@ -93,6 +93,23 @@ type NATRule struct {
 	TranslationAddress string
 }
 
+// ServiceSection contains normalized service render data.
+type ServiceSection struct {
+	LANs    []ServiceLAN
+	SSHPort int
+}
+
+// ServiceLAN describes one downstream IPv4 LAN used by DHCP and DNS forwarding services.
+type ServiceLAN struct {
+	Name        string
+	LANIP       string
+	NetIPPrefix string
+	LeaseSecs   int
+	RangeStart  string
+	RangeStop   string
+	SubnetID    int
+}
+
 // Normalize converts decoded payload fields into template-ready data.
 func Normalize(root map[string]json.RawMessage, portMap map[string][]string) (RenderData, error) {
 	interfaces, err := normalizeInterfaces(root, portMap)
@@ -105,5 +122,10 @@ func Normalize(root map[string]json.RawMessage, portMap map[string][]string) (Re
 		return RenderData{}, err
 	}
 
-	return RenderData{Interfaces: interfaces, NAT: nat}, nil
+	services, err := normalizeServices(root)
+	if err != nil {
+		return RenderData{}, err
+	}
+
+	return RenderData{Interfaces: interfaces, NAT: nat, Services: services}, nil
 }

@@ -22,8 +22,15 @@ type rawEthernet struct {
 }
 
 type rawIPv4 struct {
-	Addressing string `json:"addressing"`
-	Subnet     string `json:"subnet"`
+	Addressing string  `json:"addressing"`
+	DHCP       rawDHCP `json:"dhcp"`
+	Subnet     string  `json:"subnet"`
+}
+
+type rawDHCP struct {
+	LeaseTime  json.RawMessage `json:"lease-time"`
+	LeaseFirst json.RawMessage `json:"lease-first"`
+	LeaseCount json.RawMessage `json:"lease-count"`
 }
 
 type rawVLAN struct {
@@ -129,7 +136,6 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 				Address:          address,
 				Description:      entry.Name,
 				MemberInterfaces: portNames,
-				EnableVLAN:       false,
 			})
 		case "downstream":
 			bridgeName := "br" + strconv.Itoa(downstreamCount+1)
@@ -138,7 +144,6 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 				Address:          address,
 				Description:      entry.Name,
 				MemberInterfaces: portNames,
-				EnableVLAN:       true,
 			}
 			bridges = append(bridges, bridge)
 			if firstDownstreamIdx < 0 {

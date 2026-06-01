@@ -31,8 +31,18 @@ func sampleCommands() string {
 	return stringsJoinLines(
 		"set interfaces bridge br0 address dhcp",
 		"set interfaces ethernet eth0 description 'WAN uplink'",
+		"set service ssh port 22",
 		"set nat source rule 100 translation address masquerade",
 	)
+}
+
+func defaultDeleteCommands() []string {
+	return []string{
+		"delete interfaces bridge",
+		"delete nat source",
+		"delete service dhcp-server",
+		"delete service dns forwarding",
+	}
 }
 
 func stringsJoinLines(lines ...string) string {

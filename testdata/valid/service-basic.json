@@ -1,0 +1,46 @@
+{
+  "interfaces": [
+    {
+      "ethernet": [
+        {
+          "select-ports": [
+            "WAN*"
+          ]
+        }
+      ],
+      "ipv4": {
+        "addressing": "dynamic"
+      },
+      "name": "WAN",
+      "role": "upstream"
+    },
+    {
+      "ethernet": [
+        {
+          "select-ports": [
+            "LAN*"
+          ]
+        }
+      ],
+      "ipv4": {
+        "addressing": "static",
+        "dhcp": {
+          "lease-count": 128,
+          "lease-first": 10,
+          "lease-time": "6h"
+        },
+        "gateway": "192.168.50.1",
+        "send-hostname": true,
+        "subnet": "192.168.50.1/24"
+      },
+      "name": "LAN",
+      "role": "downstream"
+    }
+  ],
+  "services": {
+    "ssh": {
+      "port": 2222
+    }
+  },
+  "uuid": 1770891457
+}

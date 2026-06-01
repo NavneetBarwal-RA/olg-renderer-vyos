@@ -1,3 +1,4 @@
+set service ssh port 22
 set nat source rule 100 outbound-interface name br0
 set nat source rule 100 source address 192.168.60.0/24
 set nat source rule 100 translation address masquerade

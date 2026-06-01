@@ -65,7 +65,7 @@ func runWithContext(ctx context.Context, args []string, out io.Writer, now func(
 	logf(out, "starting VyOS apply smoke test")
 	logf(out, "warning: this modifies VyOS runtime configuration")
 	logf(out, "warning: minimal-targeted deletes and recreates interfaces bridge %s with DHCP and %s membership; networking may briefly flap", smokeBridgeName, smokeBridgeMember)
-	logf(out, "warning: minimal-managed uses normal policy and may delete interfaces bridge and nat source; networking may briefly flap")
+	logf(out, "warning: minimal-managed uses normal policy and may delete interfaces bridge, nat source, service dhcp-server, and service dns forwarding; networking may briefly flap")
 
 	if !cfg.skipApply {
 		logf(out, "checking required binaries")
@@ -250,7 +250,7 @@ func logResult(out io.Writer, result apply.Result) {
 func logCleanupGuidance(out io.Writer) {
 	logf(out, "cleanup guidance:")
 	logf(out, "minimal-targeted deletes and recreates interfaces bridge %s with DHCP and %s membership", smokeBridgeName, smokeBridgeMember)
-	logf(out, "minimal-managed uses normal apply policy and may delete interfaces bridge and nat source")
+	logf(out, "minimal-managed uses normal apply policy and may delete interfaces bridge, nat source, service dhcp-server, and service dns forwarding")
 	logf(out, "run only on a disposable/lab VyOS VM or restore config from backup afterward")
 	logf(out, "preferred rollback is re-applying known-good desired config through the normal NATS agent path")
 }

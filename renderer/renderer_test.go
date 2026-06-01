@@ -245,8 +245,11 @@ func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render failed: %v", err)
 	}
-	if out.RenderedText != "" {
+	if strings.Contains(out.RenderedText, "set interfaces") || strings.Contains(out.RenderedText, "set nat") {
 		t.Fatalf("expected wrapper payload not to render nested config, got:\n%s", out.RenderedText)
+	}
+	if out.RenderedText != "set service ssh port 22\n" {
+		t.Fatalf("expected only default SSH service output, got:\n%s", out.RenderedText)
 	}
 }
 
@@ -832,6 +835,77 @@ func TestRenderEthernetDescriptionPrefersBaseInterface(t *testing.T) {
 }
 
 /*
+TC-SERVICE-RENDERER-001
+Type: Positive
+Title: Service render order and commands
+Summary:
+Renders a payload with interfaces, service data, and NAT to verify the new
+service section is emitted between interfaces and NAT. The service output
+must include DHCP, DNS forwarding, and the configured SSH port.
+
+Validates:
+  - DHCP server set commands are rendered
+  - DNS forwarding and SSH port set commands are rendered
+  - Render order is interfaces, service, then nat
+*/
+func TestRenderServiceCommandsAndOrder(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["WAN*"]}],
+				"ipv4": {"addressing": "dynamic"},
+				"name": "WAN",
+				"role": "upstream"
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN*"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"},
+				"name": "LAN",
+				"role": "downstream"
+			}
+		],
+		"services": {"ssh": {"port": 2222}},
+		"nat": {
+			"snat": {
+				"rules": [{
+					"rule-id": 100,
+					"out-interface": {"name": "br0"},
+					"source": {"address": "192.168.50.0/24"},
+					"translation": {"address": "masquerade"}
+				}]
+			}
+		}
+	}`)
+
+	out, err := renderPayload(t, payload)
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	expectedLines := []string{
+		"set interfaces bridge br1 address 192.168.50.1/24",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option default-router 192.168.50.1",
+		"set service dns forwarding allow-from 192.168.50.0/24",
+		"set service dns forwarding cache-size 0",
+		"set service dns forwarding listen-address 192.168.50.1",
+		"set service ssh port 2222",
+		"set nat source rule 100 outbound-interface name br0",
+	}
+	last := -1
+	for _, line := range expectedLines {
+		idx := strings.Index(out.RenderedText, line)
+		if idx < 0 {
+			t.Fatalf("expected output to contain %q\n%s", line, out.RenderedText)
+		}
+		if idx <= last {
+			t.Fatalf("expected %q after previous line\n%s", line, out.RenderedText)
+		}
+		last = idx
+	}
+}
+
+/*
 TC-GOLDEN-001
 Type: Positive
 Title: Golden fixture rendering
@@ -855,6 +929,7 @@ func TestRenderGoldenFixtures(t *testing.T) {
 	fixtures := []string{
 		"interface-basic",
 		"interface-vlan",
+		"service-basic",
 		"nat-explicit",
 		"nat-absent",
 		"full-mvp",

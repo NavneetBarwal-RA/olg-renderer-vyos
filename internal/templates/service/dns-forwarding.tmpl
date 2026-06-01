@@ -1,0 +1,9 @@
+{{- range .LANs }}
+set service dns forwarding allow-from {{ .NetIPPrefix }}
+{{- end }}
+{{- if .LANs }}
+set service dns forwarding cache-size 0
+{{- end }}
+{{- range .LANs }}
+set service dns forwarding listen-address {{ .LANIP }}
+{{- end }}

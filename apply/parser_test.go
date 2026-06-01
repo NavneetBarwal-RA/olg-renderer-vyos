@@ -160,19 +160,59 @@ Passes set commands for roots outside the MVP renderer/apply allowlist.
 Protected or future roots must not be accepted implicitly.
 
 Validates:
-  - System and service paths are rejected
+  - System and unsupported service paths are rejected
   - Users and protocols paths are rejected
   - Failures use invalid_command
 */
 func TestParseCommandsRejectsUnsupportedSetPaths(t *testing.T) {
 	tests := []string{
 		"set system host-name router1",
-		"set service ssh port 22",
+		"set service ssh disable-password-authentication",
+		"set service https listen-address 192.0.2.1",
 		"set users user admin authentication plaintext-password test",
 		"set protocols static route 0.0.0.0/0 next-hop 1.1.1.1",
 	}
 
 	for _, input := range tests {
+		_, err := parseCommands(input)
+		assertApplyCode(t, err, CodeInvalidCommand)
+	}
+}
+
+/*
+TC-APPLY-SERVICE-001
+Type: Mixed
+Title: Service set path allowlist
+Summary:
+Checks the service commands emitted by the renderer are accepted by Prepare
+while unsupported service paths remain protected. SSH is intentionally limited
+to the concrete port path.
+
+Validates:
+  - service dhcp-server set commands are accepted
+  - service dns forwarding set commands are accepted
+  - service ssh port is accepted and unsupported SSH/service paths are rejected
+*/
+func TestParseCommandsAllowsRendererServicePaths(t *testing.T) {
+	input := stringsJoinLines(
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dns forwarding allow-from 192.168.50.0/24",
+		"set service ssh port 22",
+	)
+	got, err := parseCommands(input)
+	assertNoApplyError(t, err)
+	assertStringSlicesEqual(t, got, []string{
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dns forwarding allow-from 192.168.50.0/24",
+		"set service ssh port 22",
+	})
+
+	for _, input := range []string{
+		"set service ssh port 0",
+		"set service ssh port 65536",
+		"set service dns cache-size 0",
+		"set service ntp server pool.ntp.org",
+	} {
 		_, err := parseCommands(input)
 		assertApplyCode(t, err, CodeInvalidCommand)
 	}

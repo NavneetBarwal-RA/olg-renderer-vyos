@@ -2,6 +2,7 @@ package apply
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -107,6 +108,8 @@ func validateSetPath(tokens []string) error {
 			return nil
 		}
 		return fmt.Errorf("nat path must be nat source")
+	case "service":
+		return validateServiceSetPath(tokens)
 	default:
 		return fmt.Errorf("root %q is not supported", tokens[1])
 	}
@@ -126,5 +129,31 @@ func validateInterfacesSetPath(tokens []string) error {
 		return fmt.Errorf("only interfaces ethernet <name> description is supported")
 	default:
 		return fmt.Errorf("interfaces path %q is not supported", tokens[2])
+	}
+}
+
+func validateServiceSetPath(tokens []string) error {
+	switch tokens[2] {
+	case "dhcp-server":
+		if len(tokens) >= 4 {
+			return nil
+		}
+		return fmt.Errorf("service dhcp-server path is too short")
+	case "dns":
+		if len(tokens) >= 5 && tokens[3] == "forwarding" {
+			return nil
+		}
+		return fmt.Errorf("service dns path must be dns forwarding")
+	case "ssh":
+		if len(tokens) != 5 || tokens[3] != "port" {
+			return fmt.Errorf("service ssh supports only port")
+		}
+		port, err := strconv.Atoi(tokens[4])
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("service ssh port must be in range 1..65535")
+		}
+		return nil
+	default:
+		return fmt.Errorf("service path %q is not supported", tokens[2])
 	}
 }

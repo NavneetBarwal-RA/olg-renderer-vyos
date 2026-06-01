@@ -30,10 +30,11 @@ func TestPrepareReturnsDefaultDeterministicPlan(t *testing.T) {
 	assertPlanEqual(t, plan, Plan{
 		Target:         "vyos",
 		ConfigUUID:     "cfg-123",
-		DeleteCommands: []string{"delete interfaces bridge", "delete nat source"},
+		DeleteCommands: defaultDeleteCommands(),
 		SetCommands: []string{
 			"set interfaces bridge br0 address dhcp",
 			"set interfaces ethernet eth0 description 'WAN uplink'",
+			"set service ssh port 22",
 			"set nat source rule 100 translation address masquerade",
 		},
 		Commit: true,
