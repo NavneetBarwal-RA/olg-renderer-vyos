@@ -1,47 +1,69 @@
 # olg-renderer-vyos
 
-`olg-renderer-vyos` is a public Go renderer library that converts validated OLG/uCentral configuration JSON into deterministic VyOS CLI `set` commands.
+`olg-renderer-vyos` is the VyOS configuration library for OLG/uCentral desired configuration.
 
-The renderer is intentionally narrow. It translates desired configuration data into command text only.
+The repository provides a renderer that converts validated OLG/uCentral JSON into deterministic VyOS CLI `set` commands, plus an apply engine that consumes those rendered commands and applies them through the default persistent VyOS CLI Shell API session executor using managed-root reconciliation.
 
 ```text
 OLG/uCentral JSON
-  -> normalize supported sections
-  -> render VyOS CLI set commands
-  -> return deterministic command text
+  -> renderer
+  -> deterministic VyOS set commands
+  -> apply engine
+  -> managed-root reconciliation
+  -> set rendered desired config
+  -> commit runtime config
 ```
 
-The rendered commands are consumed by `olg-server-vyos-client-natagent`. The agent is responsible for loading desired config from NATS KV, adapting the payload for this renderer, reconciling device state, applying commands, committing, saving, and publishing configure results.
+The repository must remain independent of NATS. `olg-server-vyos-client-natagent` owns NATS command handling, KV loading, result/status publishing, and orchestration.
+
+For detailed implementation contracts and acceptance requirements, see `SPEC.md`.
+
+---
+
+## Current State and Intended Direction
+
+Current implemented capabilities:
+
+```text
+renderer:
+  OLG/uCentral JSON -> VyOS CLI set-command text
+
+apply:
+  VyOS set-command text -> managed-root reconciliation -> default VyOS executor -> commit
+```
+
+The renderer and apply engine should live in the same repository but remain separate public packages.
+
+Recommended package split:
+
+```text
+renderer/
+  public renderer API
+
+apply/
+  public apply engine API
+
+internal/vyos:
+  controlled VyOS session runner used by the default apply executor
+```
 
 ---
 
 ## Responsibility
 
-`olg-renderer-vyos` owns:
+High-level responsibility split:
 
 ```text
-- OLG/uCentral JSON to VyOS set-command rendering
-- public renderer facade used by olg-server-vyos-client-natagent
-- schema/version compatibility checks
-- normalization into render-friendly data
-- deterministic command ordering
-- typed render errors
-- renderer fixtures and golden tests
-```
+renderer package:
+  converts OLG/uCentral desired config into deterministic VyOS set commands
 
-`olg-renderer-vyos` does not own:
+apply package:
+  validates rendered commands, prepares managed-root reconciliation operations,
+  executes through the default controlled VyOS executor, and commits
 
-```text
-- NATS or JetStream connections
-- KV read/write
-- configure/action handler registration
-- result/status publishing
-- local applied UUID state
-- VyOS delete/reconcile planning
-- VyOS apply/commit/save/discard
-- shell command execution
-- live device inspection
-- runtime schema fetching
+olg-server-vyos-client-natagent:
+  owns NATS, KV loading, temporary applied UUID state, startup reconcile,
+  result/status publishing, and orchestration
 ```
 
 ---
@@ -53,16 +75,16 @@ olg-ucentral-schema
   defines the source configuration schema and validation rules
 
 olg-ucentral-client
-  validates desired config and sends it over NATS
+  validates desired config and sends configure/action commands through the NATS flow
 
 nats-agent-core
   provides common NATS, KV, command, result, and status behavior
 
 olg-server-vyos-client-natagent
-  loads desired config, calls the renderer, reconciles/applies commands, and publishes results
+  handles NATS lifecycle, loads desired config, calls renderer/apply APIs, and publishes results
 
 olg-renderer-vyos
-  renders supported OLG/uCentral config into VyOS CLI set commands
+  renders supported OLG/uCentral config and applies rendered VyOS commands through a local apply engine
 ```
 
 ---
@@ -71,15 +93,20 @@ olg-renderer-vyos
 
 ```text
 olg-server-vyos-client-natagent
-  -> LoadDesiredConfig(ctx, target)
-  -> extract desired payload
-  -> build renderer input metadata
-  -> call olg-renderer-vyos
-  -> receive rendered VyOS set commands
-  -> pass commands to internal apply/reconcile engine
+  -> receive cmd.configure.vyos
+  -> load desired config from KV
+  -> compare desired UUID with temporary applied UUID
+  -> if same UUID: publish already_in_sync/success and skip render/apply
+  -> if different UUID: call renderer.Render(...)
+  -> call apply.Engine.Apply(...)
+  -> update temporary applied UUID after successful apply
+  -> publish configure result/status
 ```
 
 The renderer receives only the desired payload and metadata provided by the caller. It does not read from NATS KV directly.
+
+The apply engine receives only rendered VyOS set-command text and apply metadata. It does not publish NATS results and does not load desired config from KV.
+`ConfigUUID` is metadata for traceability and result shaping; duplicate-detection ownership remains in the VyOS NATS client.
 
 ---
 
@@ -188,24 +215,353 @@ set interfaces bridge br0 description 'WAN'
 set interfaces bridge br0 member interface eth0
 ```
 
-The renderer describes the desired configuration only. Delete, reconcile, apply, commit, save, discard, and device execution are agent responsibilities.
+The renderer describes the desired configuration only. Delete, apply, commit, save, discard, and device execution are apply-engine responsibilities.
+
+---
+
+## Apply package
+
+The public `apply` package safely applies renderer-generated VyOS `set` commands using managed-root reconciliation. It validates the rendered command text, builds a deterministic plan that replaces only explicitly managed roots, then executes that structured plan through the default internal VyOS CLI Shell API session executor unless an advanced caller overrides the executor.
+
+Current default behavior:
+
+```text
+- explicit managed roots
+- delete managed roots
+- recreate desired config under managed roots
+- commit runtime config
+- save only if requested
+- preserve everything outside managed roots
+```
+
+Not current behavior:
+
+```text
+- whole-device reconciliation is not current behavior
+- delete everything except a preserve whitelist is not current behavior
+- dependency on vyatta-save-config.pl is not current behavior
+```
+
+Managed-root reconciliation is also managed-subtree replacement: if a root is managed, apply deletes that root and recreates the desired subtree under it. If a root is not managed, apply leaves it alone by default.
+
+### Public API
+
+| API | Purpose |
+| --- | --- |
+| `apply.New(opts ...Option)` | Creates an apply engine. |
+| `(*Engine).Prepare(ctx, input)` | Validates input and returns a deterministic non-executing plan. |
+| `(*Engine).Apply(ctx, input)` | Validates, plans, executes through an executor, and commits. |
+| `apply.GetInfo()` | Returns package metadata and defaults. |
+| `(*Engine).Info()` | Returns the same metadata from an engine instance. |
+| `apply.WithExecutor(exec)` | Overrides the default executor for tests or advanced controlled integrations. |
+| `apply.WithSaveAfterCommit(enabled)` | Controls optional save after commit. |
+| `apply.WithResetPolicy(policy)` | Replaces the reset policy after validating every root. |
+
+### Input
+
+`Target`, `ConfigUUID`, and `DesiredCommands` are required. For the MVP, `Target` must be `vyos`.
+
+`ConfigUUID` is metadata only. The apply package preserves it in `Plan` and `Result`, but it does not use it for duplicate detection or applied-state comparison.
+
+`DesiredCommands` must be non-empty renderer-generated VyOS CLI `set` command text. Empty desired commands are rejected and never produce managed-root delete commands. Empty configure payloads must not be used as reset-to-default.
+
+### Plan and result
+
+`Prepare` returns a `Plan` with:
+
+```text
+Target
+ConfigUUID
+DeleteCommands
+SetCommands
+Commit
+Save
+```
+
+`DeleteCommands` come from the reset policy. `SetCommands` are the validated renderer commands in input order. `Commit` is true for the configure apply path. `Save` is false by default and true only when `WithSaveAfterCommit(true)` is configured.
+
+`Apply` is the production execution API. Production callers normally call `apply.New()` and then `Apply()` directly; `Prepare()` is optional preview only and is not required before `Apply()`.
+
+`Apply` returns a `Result` with:
+
+```text
+Target
+ConfigUUID
+Applied
+Saved
+DeleteCommands
+SetCommands
+DeleteOutput
+SetOutput
+CommitOutput
+SaveOutput
+DiscardOutput
+```
+
+On delete, set, or commit failure, the default executor attempts `discard` and returns the best partial result available with `Applied=false`. If save fails after commit, `Applied=true`, `Saved=false`, and the error code is `save_failed`.
+
+### Apply Ownership Model
+
+The renderer/apply engine does not own the whole VyOS device configuration. It owns only declared managed roots. During apply, it deletes those managed roots, recreates desired configuration under those roots, and preserves configuration outside managed roots by default.
+
+Absence of a config item from desired state deletes it only when that item is inside a managed root. Manual changes under a managed root are expected to be overwritten on the next apply; manual changes outside managed roots are preserved by default.
+
+Currently managed roots are defined by `apply.DefaultResetPolicy()` in [apply/policy.go](apply/policy.go):
+
+```text
+interfaces bridge
+nat source
+```
+
+The default plan deletes:
+
+```text
+delete interfaces bridge
+delete nat source
+```
+
+Unmanaged VyOS config must not be deleted by the default apply path, including `system login`, `system config-management`, `service ntp`, `interfaces loopback`, `interfaces ethernet` / WAN access, and other non-owned configuration. For this phase, whole-device reconciliation is not the design because an incomplete preserve list could delete SSH, login, WAN, NTP, or other system config. Full-device reconciliation, if ever added, must be a separate explicit mode with stronger safeguards.
+
+For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge`, `interfaces bridge br0` for targeted lab smoke, and `nat source`; all other roots are rejected.
+
+### Command validation
+
+The apply parser is line-based and quote-aware. It normalizes CRLF, trims each line, ignores blank lines, rejects comment lines, rejects unclosed quotes, rejects shell/control metacharacters, requires every command to start with `set`, and allowlists only:
+
+```text
+set interfaces bridge ...
+set nat source ...
+set interfaces ethernet <name> description ...
+```
+
+Commands such as `commit`, `save`, `delete`, `show`, `set system ...`, `set service ...`, and unsupported ethernet changes are rejected before any executor call.
+
+### Executor contract
+
+`Apply` uses this boundary internally:
+
+```go
+type Executor interface {
+    Execute(ctx context.Context, plan apply.Plan) (apply.ExecutionResult, error)
+}
+```
+
+The default executor uses one persistent VyOS CLI Shell API configuration session:
+
+```text
+acquire /run/lock/olg-vyos-apply.lock
+/usr/bin/cli-shell-api getSessionEnv <apply-process-id>
+/usr/bin/cli-shell-api setupSession
+/opt/vyatta/sbin/my_delete ...
+/opt/vyatta/sbin/my_set ...
+/opt/vyatta/sbin/my_commit
+optional /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper save when save is enabled
+/opt/vyatta/sbin/my_discard on failure before commit
+/usr/bin/cli-shell-api teardownSession
+release /run/lock/olg-vyos-apply.lock
+```
+
+The default session identifier is the apply process ID. The session environment returned by `getSessionEnv` is reused for every delete, set, commit, save, discard, and teardown operation in that apply. The executor does not run independent stateless wrapper `begin`, `set`, `commit`, and `end` calls after opening a session.
+
+On delete, set, or commit failure, the executor attempts `/opt/vyatta/sbin/my_discard` before returning the typed apply error. Cleanup uses a bounded context that ignores caller cancellation so discard and teardown are still attempted after cancellation. Save remains disabled by default unless `WithSaveAfterCommit(true)` is configured. `save=false` is runtime commit only and does not require or call any save helper. `save=true` persists configuration by passing `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper` with the same session environment; enable it only after manually validating that save mechanism on the target VyOS image. Modern VyOS rolling images may not have `/opt/vyatta/sbin/vyatta-save-config.pl`, and this repository must not depend on it.
+
+The local apply lock prevents two agent apply operations from running concurrently in this process/device path. It does not prevent a human from opening `configure`. Hard process kills, VM crashes, or `SIGKILL` can still interrupt cleanup; startup cleanup or a reboot may be required if VyOS reports stale candidate overlays.
+
+The executor receives structured `DeleteCommands` and `SetCommands`; it does not receive one concatenated shell string and the apply package does not expose arbitrary command execution. `WithExecutor(...)` remains available for tests and advanced controlled integrations. Custom executors receive already validated `Plan` data from `Apply`, but they can bypass runtime execution safety if implemented incorrectly, so they must not execute concatenated shell strings or expose arbitrary command execution.
+
+The apply package intentionally does not expose generic raw APIs such as `Run`, `Shell`, `Set`, `Commit`, `Save`, or `Show`. Separate operational action APIs for showconfig, show, save, or discard can be added later if needed, but they are not part of configure apply.
+
+### NAT client integration
+
+`olg-server-vyos-client-natagent` should load desired config from KV, call `renderer.Render(...)`, verify `RenderedText` is non-empty, then call `apply.Engine.Apply(...)`. The agent does not call or import executor internals separately.
+
+The NAT client owns KV loading, NATS command handling, applied UUID state, duplicate detection, startup reconcile, and result/status publishing.
+
+Lab-only smoke test guidance for manual VyOS validation is documented in [docs/vyos-apply-smoke.md](docs/vyos-apply-smoke.md).
+
+### Lab-only VyOS smoke test
+
+The repository includes an opt-in manual smoke command for disposable/lab VyOS targets. It is not run by CI and it is not a replacement for the fake executor/fake runner unit tests.
+
+Preview without applying:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal-targeted --skip-apply
+```
+
+Run on a lab VyOS VM/device:
+
+```bash
+go run ./cmd/vyos-apply-smoke --i-understand-this-modifies-vyos --mode minimal-targeted --save=false
+```
+
+The command logs required binary checks, apply input, `Prepare` plan details, `Apply` result fields, errors, and cleanup guidance with a `[smoke]` prefix. Expected output includes:
+
+```text
+[smoke] starting VyOS apply smoke test
+[smoke] checking required binaries
+[smoke] found /usr/bin/cli-shell-api
+[smoke] found /opt/vyatta/sbin/my_set
+[smoke] found /opt/vyatta/sbin/my_delete
+[smoke] found /opt/vyatta/sbin/my_commit
+[smoke] found /opt/vyatta/sbin/my_discard
+[smoke] previewing plan with Prepare
+[smoke] plan delete_count=1 set_count=3 commit=true save=false
+[smoke] applying plan through Apply
+[smoke] result applied=true saved=false
+[smoke] completed successfully
+```
+
+Smoke interpretation: the default `minimal-targeted` preview plan deletes `interfaces bridge br0`, then recreates it with DHCP, the smoke description, and `eth0` membership:
+
+```text
+delete interfaces bridge br0
+set interfaces bridge br0 address dhcp
+set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
+set interfaces bridge br0 member interface eth0
+```
+
+Use `--mode minimal-managed` when you intentionally want the smoke command to exercise the normal managed-root policy with `delete interfaces bridge` and `delete nat source`. The smoke payload intentionally does not change `interfaces ethernet eth0`. Manual changes under `interfaces bridge br0` are expected to be overwritten on the next targeted smoke apply because that node is reset by the smoke policy.
+
+Verification commands for a lab VyOS VM:
+
+```bash
+show configuration commands | match "interfaces bridge"
+show configuration commands | match "OLG_APPLY_SMOKE_TEST"
+show configuration commands | match "interfaces ethernet eth0 description"
+```
+
+The ethernet description should remain whatever it was before the smoke test.
+
+Warning: `minimal-targeted` deletes and recreates `interfaces bridge br0` with DHCP and `eth0` membership; management networking can briefly flap during commit. `minimal-managed` uses the normal apply policy and may delete `interfaces bridge` and `nat source`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
+
+Example `Prepare` usage:
+
+```go
+engine, err := apply.New()
+if err != nil {
+    // handle error
+}
+
+plan, err := engine.Prepare(ctx, apply.Input{
+    Target:          "vyos",
+    ConfigUUID:      "cfg-123",
+    DesiredCommands: rendered.RenderedText,
+})
+```
+
+Example end-to-end render and apply usage:
+
+```go
+rendererEngine, err := renderer.New()
+if err != nil {
+    // handle error
+}
+
+rendered, err := rendererEngine.Render(ctx, renderer.Input{
+    Target:        "vyos",
+    ConfigUUID:    "cfg-123",
+    SchemaName:    "olg-ucentral",
+    SchemaVersion: "4.2.0",
+    PayloadJSON:   payload,
+})
+if err != nil {
+    // handle error
+}
+
+applier, err := apply.New()
+if err != nil {
+    // handle error
+}
+
+result, err := applier.Apply(ctx, apply.Input{
+    Target:          "vyos",
+    ConfigUUID:      rendered.ConfigUUID,
+    DesiredCommands: rendered.RenderedText,
+})
+```
+
+---
+
+## Apply Engine Behavior
+
+The initial apply mode is managed-root reconciliation.
+
+At a high level, apply deletes explicit managed roots, applies rendered set commands under those roots, and commits once. It must not delete the full VyOS config and does not save by default.
+
+Detailed managed roots, empty command behavior, executor safety, and acceptance criteria are defined in `SPEC.md`.
+
+---
+
+## Commit and Save Policy
+
+Default behavior:
+
+```text
+commit = yes
+save = no
+```
+
+The KV desired config is the source of truth. VyOS saved config should remain bootstrap/recovery config by default.
+
+After reboot:
+
+```text
+VyOS boots from saved bootstrap config
+  -> agent connects to NATS
+  -> agent loads latest desired config from KV
+  -> renderer renders
+  -> apply engine applies and commits runtime config
+```
+
+Critical requirement:
+
+```text
+The saved bootstrap config must be sufficient for the agent to reconnect to NATS/KV after reboot.
+```
+
+Saving after commit is available as an explicit option, but it is not the default behavior. `save=false` means runtime commit only. `save=true` persists configuration by running `save` through `/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper`; enable it only after manual validation on the specific target VyOS image. The apply engine must not require `/opt/vyatta/sbin/vyatta-save-config.pl`.
+
+Recommended agent apply setting:
+
+```yaml
+agent:
+  apply:
+    save_after_commit: false
+```
+
+---
+
+## VyOS NATS Client Temporary Applied State
+
+The temporary applied state belongs to `olg-server-vyos-client-natagent`.
+
+Recommended default path:
+
+```text
+/run/olg-vyos-client/applied-state.json
+```
+
+It stores the latest desired config UUID successfully rendered/applied during the current boot and is updated only after successful render+apply.
+
+Detailed integration and state contracts are defined in `SPEC.md`.
 
 ---
 
 ## Public Client Usage
 
-`olg-server-vyos-client-natagent` or any other caller should interact with this library through the public `renderer` package only.
+`olg-server-vyos-client-natagent` or any other caller should interact with this library through public packages only.
 
-Typical client flow:
+Typical render flow:
 
 ```text
-- build renderer.Input from desired-config metadata plus the raw OLG/uCentral payload
+- build renderer.Input from desired-config metadata plus raw OLG/uCentral payload
 - call renderer.New(), optionally with renderer.WithPortMap(...)
 - call Render(ctx, input)
 - consume output.RenderedText as deterministic VyOS set-command text
 ```
 
-Example:
+Example renderer usage:
 
 ```go
 package main
@@ -265,38 +621,56 @@ func main() {
 }
 ```
 
-Port mapping:
-
-```go
-r, err := renderer.New(renderer.WithPortMap(map[string][]string{
-  "WAN*": []string{"eth10"},
-  "LAN*": []string{"eth8", "eth9"},
-}))
-```
-
-`WithPortMap` extends or overrides the default MVP fixture mapping. A selector can resolve to one or more physical interfaces; for example, `LAN*` is a group/wildcard selector. The renderer only consumes the provided mapping; it does not read mapping files, inspect live interfaces, or fetch device inventory. Production VyOS agent or device-profile code may load mapping data from files, inventory, or another source and pass the resolved map into the renderer.
-
-For a full end-to-end sample using the canonical `full-mvp` fixture, run:
-
-```bash
-go test -run TestPublicClientRenderFullMVPFlow -v ./renderer
-```
-
-That sample test prints:
+Typical apply flow:
 
 ```text
-- the input fixture JSON
-- the rendered VyOS set-command output
-- PASS/FAIL status against testdata/golden/full-mvp.set
+- create apply engine with apply.New()
+- pass non-empty renderer output into apply.Input
+- optionally call Prepare for validation/safety preview
+- call Apply for managed-root replacement and commit
+- publish result/status from the caller, not from the apply package
 ```
 
-This sample is best treated as an integration-style library contract test because it exercises the public API, normalization, templates, and golden fixtures together.
+Example apply usage:
+
+```go
+applier, err := apply.New()
+if err != nil {
+  log.Fatal(err)
+}
+
+result, err := applier.Apply(ctx, apply.Input{
+  Target:          rendered.Target,
+  ConfigUUID:      rendered.ConfigUUID,
+  DesiredCommands: rendered.RenderedText,
+})
+```
+
+Empty desired config is not a valid configure input. The renderer must not produce empty `RenderedText` for a successful configure render, and the apply package must reject empty `DesiredCommands`.
+Reset/default behavior should be implemented as a separate explicit action, not by sending an empty configure payload.
 
 ---
 
-## Initial MVP Scope
+## Port Mapping
 
-The first implementation should support:
+```go
+r, err := renderer.New(renderer.WithPortMap(map[string][]string{
+  "WAN*": {"eth10"},
+  "LAN*": {"eth8", "eth9"},
+}))
+```
+
+`WithPortMap` extends or overrides the default MVP fixture mapping. A selector can resolve to one or more physical interfaces; for example, `LAN*` is a group/wildcard selector.
+
+The renderer only consumes the provided mapping. It does not read mapping files, inspect live interfaces, or fetch device inventory.
+
+Production VyOS agent or device-profile code may load mapping data from files, inventory, or another source and pass the resolved map into the renderer.
+
+---
+
+## Initial Renderer MVP Scope
+
+The implemented renderer MVP supports:
 
 ```text
 - interface rendering
@@ -403,8 +777,6 @@ LAN1 -> eth1
 LAN2 -> eth2
 ```
 
-Production mapping should be resolved by the agent or device-profile layer and passed into the renderer with `WithPortMap`. The renderer must remain side-effect free and must not load mapping files or inspect the live device.
-
 ---
 
 ## Explicit NAT Rendering Example
@@ -457,24 +829,10 @@ MVP NAT translation support:
 ```text
 - explicit source NAT uses nat.snat.rules[].translation.address
 - translation.address may be a concrete translated address
-- translation.address may also be a schema-supported keyword such as masquerade
-```
-
-Example:
-
-```json
-"translation": {
-  "address": "masquerade"
-}
+- translation.address may be a schema-supported keyword such as masquerade
 ```
 
 Example output:
-
-```text
-set nat source rule 100 translation address masquerade
-```
-
-Expected output:
 
 ```text
 set nat source rule 100 outbound-interface name br0
@@ -542,19 +900,11 @@ The MVP supported version matches the checked-in OLG/uCentral schema metadata in
 
 Avoid broad min/max ranges until compatibility across versions is understood.
 
-Future support can be added as:
-
-```text
-supported schema versions:
-- 4.2.0
-- 4.3.0
-```
-
-or through version-specific normalizers when schema changes require different translation behavior.
-
 ---
 
 ## Repository Layout
+
+Desired layout after adding the apply engine:
 
 ```text
 olg-renderer-vyos/
@@ -566,6 +916,15 @@ olg-renderer-vyos/
     renderer.go
     types.go
     errors.go
+
+  apply/
+    engine.go
+    types.go
+    options.go
+    errors.go
+    parser.go
+    policy.go
+    planner.go
 
   internal/
     normalize/
@@ -583,97 +942,48 @@ olg-renderer-vyos/
         ethernet.tmpl
         vlan.tmpl
 
+    vyos/
+      executor.go
+
   testdata/
     valid/
-      interface-basic.json
-      nat-explicit.json
-      interface-vlan.json
-      nat-absent.json
-      full-mvp.json
-
     golden/
-      interface-basic.set
-      nat-explicit.set
-      interface-vlan.set
-      nat-absent.set
-      full-mvp.set
 
   schemas/
-    README.md
-    manifest.example.json
-
     ucentral/
-      SOURCE.md
-      schema.json
-      ucentral.schema.full.json
-
     vyos/
-      SOURCE.md
-      vyos-config-schema.json
 ```
 
-Add files only when real renderer logic requires them.
-
----
-
-## Template Direction
-
-Templates are implementation assets. They should be added when renderer implementation begins.
-
-Templates should format already-normalized render data.
-
-```text
-normalize/
-  decides what should be rendered
-
-templates/
-  decides how normalized data should look as VyOS set-command text
-```
-
-Planned MVP template files:
-
-```text
-internal/templates/interface.tmpl
-internal/templates/interface/bridge.tmpl
-internal/templates/interface/ethernet.tmpl
-internal/templates/interface/vlan.tmpl
-internal/templates/nat.tmpl
-```
-
-`templates.go` should control top-level order:
-
-```text
-interfaces
-nat
-```
-
-No root template is required for the MVP.
+Add files only when real implementation requires them.
 
 ---
 
 ## Testing
 
-Required tests:
+Renderer tests include golden output comparison and deterministic rendering checks.
+
+Apply tests cover Prepare planning, command validation, rejection of empty `DesiredCommands`, managed-root deletion for valid rendered commands, executor ordering, commit failure behavior, and save-disabled default.
+
+Detailed test matrix and acceptance criteria are defined in `SPEC.md`.
+
+NATS client integration responsibility:
 
 ```text
-- valid interface rendering
-- valid VLAN rendering
-- valid explicit NAT rendering
-- NAT absent behavior
-- invalid JSON
-- unsupported target
-- unsupported schema name
-- unsupported schema version
-- metadata mismatch
-- deterministic output
+- VyOS NATS client skips render/apply when desired UUID equals temporary applied UUID
 ```
 
-Golden test flow:
+Golden renderer test flow:
 
 ```text
 testdata/valid/*.json
   -> render
   -> compare exactly with testdata/golden/*.set
+```
+
+For a full end-to-end renderer sample using the canonical `full-mvp` fixture, run:
+
+```bash
+go test -run TestPublicClientRenderFullMVPFlow -v ./renderer
 ```
 
 ---
@@ -683,26 +993,38 @@ testdata/valid/*.json
 Future renderer work may include:
 
 ```text
-- DHCP set-command rendering
-- DNS set-command rendering
-- firewall set-command rendering
-- routing set-command rendering
-- system set-command rendering
-- service set-command rendering
-- PKI set-command rendering
-- multiple schema versions
-- schema fixture validation in CI
-- VyOS schema command-path validation
+- DHCP, DNS, firewall, routing, service, system, and PKI rendering
+- multiple schema versions and stronger schema validation in CI
 ```
 
-Future agent-side work belongs outside this repo:
+Future apply work may include:
 
 ```text
-- delete/reconcile planning
-- last-applied state comparison
-- protected device config policy
-- VyOS commit/save/discard handling
-- show/get operational commands
+- configurable managed roots
+- commit-confirm support
+- optional save-after-commit mode
+- live drift inspection
+- old-vs-new diff mode if required
+```
+
+---
+
+## Detailed Design
+
+The full implementation specification is in `SPEC.md`.
+
+`SPEC.md` defines:
+
+```text
+- renderer contracts
+- apply API contracts
+- managed-root policy
+- unmanaged configuration boundaries
+- empty DesiredCommands rejection behavior
+- executor safety rules
+- VyOS NATS client integration contract
+- use cases
+- testing and acceptance criteria
 ```
 
 ---
@@ -713,9 +1035,23 @@ Future agent-side work belongs outside this repo:
 
 ```text
 small
-pure
+explicit
 deterministic
 schema-aware
-template-driven
-focused only on JSON-to-set-command rendering
+side-effect free in renderer
+safe and allowlist-based in apply
+independent of NATS
+```
+
+Final repository model:
+
+```text
+renderer:
+  OLG/uCentral JSON -> VyOS set commands
+
+apply:
+  VyOS set commands -> managed-root reconciliation -> commit runtime config
+
+vyos-nats-agent:
+  NATS lifecycle, KV loading, renderer/apply orchestration, result publishing
 ```
