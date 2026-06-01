@@ -17,10 +17,6 @@ const (
 	defaultSSHPort        = 22
 )
 
-type rawServices struct {
-	SSH rawSSHService `json:"ssh"`
-}
-
 type rawSSHService struct {
 	Port json.RawMessage `json:"port"`
 }
@@ -32,82 +28,69 @@ type sortableServiceLAN struct {
 	vlanID   int
 }
 
-func normalizeServices(root map[string]json.RawMessage) (ServiceSection, error) {
-	sshPort, err := normalizeSSHPort(root)
+func normalizeServices(root map[string]json.RawMessage, inputs []ServiceLANInput) (ServiceSection, error) {
+	sshPort, sshEnabled, err := normalizeSSHPort(root)
 	if err != nil {
 		return ServiceSection{}, err
 	}
 
-	lans, err := normalizeServiceLANs(root)
+	lans, err := normalizeServiceLANs(inputs)
 	if err != nil {
 		return ServiceSection{}, err
 	}
 
-	return ServiceSection{LANs: lans, SSHPort: sshPort}, nil
+	return ServiceSection{LANs: lans, SSHEnabled: sshEnabled, SSHPort: sshPort}, nil
 }
 
-func normalizeSSHPort(root map[string]json.RawMessage) (int, error) {
+func normalizeSSHPort(root map[string]json.RawMessage) (int, bool, error) {
 	rawRootServices, ok := root["services"]
 	if !ok {
-		return defaultSSHPort, nil
+		return 0, false, nil
 	}
 
-	var services rawServices
+	var services map[string]json.RawMessage
 	if err := json.Unmarshal(rawRootServices, &services); err != nil {
-		return 0, newError(CodeNormalizeFailed, "services must be an object", err)
-	}
-	if len(services.SSH.Port) == 0 {
-		return defaultSSHPort, nil
+		return 0, false, newError(CodeNormalizeFailed, "services must be an object", err)
 	}
 
-	port, err := parseJSONInt(services.SSH.Port)
+	rawSSH, ok := services["ssh"]
+	if !ok {
+		return 0, false, nil
+	}
+	if string(rawSSH) == "null" {
+		return 0, false, newError(CodeNormalizeFailed, "services.ssh must be an object", nil)
+	}
+
+	var ssh rawSSHService
+	if err := json.Unmarshal(rawSSH, &ssh); err != nil {
+		return 0, false, newError(CodeNormalizeFailed, "services.ssh must be an object", err)
+	}
+	if len(ssh.Port) == 0 {
+		return defaultSSHPort, true, nil
+	}
+
+	port, err := parseJSONInt(ssh.Port)
 	if err != nil {
-		return 0, newError(CodeNormalizeFailed, "services.ssh.port must be an integer", err)
+		return 0, false, newError(CodeNormalizeFailed, "services.ssh.port must be an integer", err)
 	}
 	if port < 1 || port > 65535 {
-		return 0, newError(CodeNormalizeFailed, "services.ssh.port must be in range 1..65535", nil)
+		return 0, false, newError(CodeNormalizeFailed, "services.ssh.port must be in range 1..65535", nil)
 	}
-	return port, nil
+	return port, true, nil
 }
 
-func normalizeServiceLANs(root map[string]json.RawMessage) ([]ServiceLAN, error) {
-	rawInterfaces, ok := root["interfaces"]
-	if !ok {
-		return nil, nil
-	}
-
-	var entries []json.RawMessage
-	if err := json.Unmarshal(rawInterfaces, &entries); err != nil {
-		return nil, newError(CodeNormalizeFailed, "interfaces must be an array", err)
-	}
-
+func normalizeServiceLANs(inputs []ServiceLANInput) ([]ServiceLAN, error) {
 	lans := make([]sortableServiceLAN, 0)
-	for idx, rawEntry := range entries {
-		var entry rawInterface
-		if err := json.Unmarshal(rawEntry, &entry); err != nil {
-			return nil, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d] is invalid", idx), err)
-		}
-		if entry.Role != "downstream" || entry.IPv4.Addressing != "static" {
-			continue
-		}
-		if entry.IPv4.Subnet == "" {
-			continue
-		}
-
-		lan, err := normalizeServiceLAN(entry, idx)
+	for _, input := range inputs {
+		lan, err := normalizeServiceLAN(input)
 		if err != nil {
-			return nil, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", idx, err), nil)
-		}
-		isVLAN := entry.VLAN != nil && entry.VLAN.ID > 0
-		vlanID := 0
-		if isVLAN {
-			vlanID = entry.VLAN.ID
+			return nil, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", input.InputIndex, err), nil)
 		}
 		lans = append(lans, sortableServiceLAN{
 			lan:      lan,
-			inputIdx: idx,
-			isVLAN:   isVLAN,
-			vlanID:   vlanID,
+			inputIdx: input.InputIndex,
+			isVLAN:   input.IsVLAN,
+			vlanID:   input.VLANID,
 		})
 	}
 
@@ -136,15 +119,15 @@ func normalizeServiceLANs(root map[string]json.RawMessage) ([]ServiceLAN, error)
 	return out, nil
 }
 
-func normalizeServiceLAN(entry rawInterface, inputIdx int) (ServiceLAN, error) {
-	if err := validateToken(entry.Name, "name", false); err != nil {
+func normalizeServiceLAN(input ServiceLANInput) (ServiceLAN, error) {
+	if err := validateToken(input.Name, "name", false); err != nil {
 		return ServiceLAN{}, err
 	}
-	if err := validateAddressToken(entry.IPv4.Subnet, "ipv4.subnet"); err != nil {
+	if err := validateAddressToken(input.Subnet, "ipv4.subnet"); err != nil {
 		return ServiceLAN{}, err
 	}
 
-	prefix, err := netip.ParsePrefix(entry.IPv4.Subnet)
+	prefix, err := netip.ParsePrefix(input.Subnet)
 	if err != nil {
 		return ServiceLAN{}, fmt.Errorf("ipv4.subnet must be an IPv4 prefix")
 	}
@@ -154,15 +137,15 @@ func normalizeServiceLAN(entry rawInterface, inputIdx int) (ServiceLAN, error) {
 	lanIP := prefix.Addr()
 	prefix = prefix.Masked()
 
-	leaseSecs, err := parseLeaseTime(entry.IPv4.DHCP.LeaseTime)
+	leaseSecs, err := parseLeaseTime(input.DHCP.LeaseTime)
 	if err != nil {
 		return ServiceLAN{}, fmt.Errorf("invalid ipv4.dhcp.lease-time: %v", err)
 	}
-	leaseFirst, err := parseOptionalPositiveInt(entry.IPv4.DHCP.LeaseFirst, defaultDHCPLeaseFirst, "ipv4.dhcp.lease-first")
+	leaseFirst, err := parseOptionalPositiveInt(input.DHCP.LeaseFirst, defaultDHCPLeaseFirst, "ipv4.dhcp.lease-first")
 	if err != nil {
 		return ServiceLAN{}, err
 	}
-	leaseCount, err := parseOptionalPositiveInt(entry.IPv4.DHCP.LeaseCount, defaultDHCPLeaseCount, "ipv4.dhcp.lease-count")
+	leaseCount, err := parseOptionalPositiveInt(input.DHCP.LeaseCount, defaultDHCPLeaseCount, "ipv4.dhcp.lease-count")
 	if err != nil {
 		return ServiceLAN{}, err
 	}
@@ -178,14 +161,17 @@ func normalizeServiceLAN(entry rawInterface, inputIdx int) (ServiceLAN, error) {
 	if !prefix.Contains(rangeStart) || !prefix.Contains(rangeStop) {
 		return ServiceLAN{}, fmt.Errorf("DHCP range is outside ipv4.subnet")
 	}
+	if err := validateDHCPRange(prefix, lanIP, rangeStart, rangeStop); err != nil {
+		return ServiceLAN{}, err
+	}
 
-	subnetID := 4051 + inputIdx
-	if entry.VLAN != nil && entry.VLAN.ID > 0 {
-		subnetID = entry.VLAN.ID
+	subnetID := 4051 + input.InputIndex
+	if input.IsVLAN && input.VLANID > 0 {
+		subnetID = input.VLANID
 	}
 
 	return ServiceLAN{
-		Name:        entry.Name,
+		Name:        input.Name,
 		LANIP:       lanIP.String(),
 		NetIPPrefix: prefix.String(),
 		LeaseSecs:   leaseSecs,
@@ -193,6 +179,30 @@ func normalizeServiceLAN(entry rawInterface, inputIdx int) (ServiceLAN, error) {
 		RangeStop:   rangeStop.String(),
 		SubnetID:    subnetID,
 	}, nil
+}
+
+func validateDHCPRange(prefix netip.Prefix, lanIP, rangeStart, rangeStop netip.Addr) error {
+	network := prefix.Masked().Addr()
+	broadcast, err := ipv4Broadcast(prefix)
+	if err != nil {
+		return err
+	}
+	startValue := ipv4ToUint32(rangeStart)
+	stopValue := ipv4ToUint32(rangeStop)
+	for _, reserved := range []struct {
+		name string
+		addr netip.Addr
+	}{
+		{name: "network address", addr: network},
+		{name: "broadcast address", addr: broadcast},
+		{name: "LAN IP", addr: lanIP},
+	} {
+		value := ipv4ToUint32(reserved.addr)
+		if startValue <= value && value <= stopValue {
+			return fmt.Errorf("DHCP range includes %s %s", reserved.name, reserved.addr)
+		}
+	}
+	return nil
 }
 
 func parseLeaseTime(raw json.RawMessage) (int, error) {
@@ -296,4 +306,30 @@ func ipv4Add(addr netip.Addr, offset int) (netip.Addr, error) {
 	var out [4]byte
 	binary.BigEndian.PutUint32(out[:], value+uint32(offset))
 	return netip.AddrFrom4(out), nil
+}
+
+func ipv4Broadcast(prefix netip.Prefix) (netip.Addr, error) {
+	if !prefix.Addr().Is4() {
+		return netip.Addr{}, fmt.Errorf("prefix is not IPv4")
+	}
+	network := ipv4ToUint32(prefix.Masked().Addr())
+	bits := prefix.Bits()
+	if bits < 0 || bits > 32 {
+		return netip.Addr{}, fmt.Errorf("invalid IPv4 prefix length")
+	}
+	hostBits := 32 - bits
+	hostMask := uint32(0)
+	if hostBits == 32 {
+		hostMask = ^uint32(0)
+	} else if hostBits > 0 {
+		hostMask = (uint32(1) << uint(hostBits)) - 1
+	}
+	var out [4]byte
+	binary.BigEndian.PutUint32(out[:], network|hostMask)
+	return netip.AddrFrom4(out), nil
+}
+
+func ipv4ToUint32(addr netip.Addr) uint32 {
+	bytes := addr.As4()
+	return binary.BigEndian.Uint32(bytes[:])
 }

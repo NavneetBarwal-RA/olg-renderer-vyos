@@ -2,6 +2,7 @@ package normalize
 
 import (
 	"encoding/json"
+	"net/netip"
 	"reflect"
 	"testing"
 )
@@ -23,15 +24,14 @@ Validates:
 func TestNormalizeServicesDerivesLANs(t *testing.T) {
 	root := mustRoot(t, `{
 		"interfaces": [
-			{"name": "WAN", "role": "upstream", "ipv4": {"addressing": "static", "subnet": "203.0.113.2/24"}},
-			{"name": "LAN-DHCP", "role": "downstream", "ipv4": {"addressing": "dynamic"}},
-			{"name": "LAN-MISSING", "role": "downstream", "ipv4": {"addressing": "static"}},
-			{"name": "LAN", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}},
-			{"name": "LAN.10", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"}, "vlan": {"id": 10}}
+			{"name": "WAN", "role": "upstream", "ethernet": [{"select-ports": ["WAN*"]}], "ipv4": {"addressing": "static", "subnet": "203.0.113.2/24"}},
+			{"name": "LAN-DHCP", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "dynamic"}},
+			{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}},
+			{"name": "LAN.10", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"}, "vlan": {"id": 10}}
 		]
 	}`)
 
-	services, err := normalizeServices(root)
+	services, err := normalizeServicesFromRoot(t, root)
 	if err != nil {
 		t.Fatalf("normalize services: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestNormalizeServicesDerivesLANs(t *testing.T) {
 			LeaseSecs:   21600,
 			RangeStart:  "192.168.50.10",
 			RangeStop:   "192.168.50.109",
-			SubnetID:    4054,
+			SubnetID:    4053,
 		},
 		{
 			Name:        "LAN.10",
@@ -95,6 +95,7 @@ func TestNormalizeServicesParsesLeaseTimes(t *testing.T) {
 				"interfaces": [{
 					"name": "LAN",
 					"role": "downstream",
+					"ethernet": [{"select-ports": ["LAN*"]}],
 					"ipv4": {
 						"addressing": "static",
 						"subnet": "192.168.50.1/24",
@@ -107,7 +108,7 @@ func TestNormalizeServicesParsesLeaseTimes(t *testing.T) {
 				}]
 			}`)
 
-			services, err := normalizeServices(root)
+			services, err := normalizeServicesFromRoot(t, root)
 			if err != nil {
 				t.Fatalf("normalize services: %v", err)
 			}
@@ -139,29 +140,29 @@ func TestNormalizeServicesRejectsInvalidLANInputs(t *testing.T) {
 	}{
 		{
 			name:    "invalid ipv4 subnet",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.50.1"}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1"}}]}`,
 		},
 		{
 			name:    "ipv6 subnet",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "2001:db8::1/64"}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "2001:db8::1/64"}}]}`,
 		},
 		{
 			name:    "invalid lease time",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": "soon"}}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": "soon"}}}]}`,
 		},
 		{
 			name:    "unsafe LAN name",
-			payload: `{"interfaces": [{"name": "LAN bad", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}}]}`,
+			payload: `{"interfaces": [{"name": "LAN bad", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}}]}`,
 		},
 		{
 			name:    "range outside subnet",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ipv4": {"addressing": "static", "subnet": "192.168.50.1/30", "dhcp": {"lease-first": 10}}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/30", "dhcp": {"lease-first": 10}}}]}`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := normalizeServices(mustRoot(t, tc.payload))
+			_, err := normalizeServicesFromRoot(t, mustRoot(t, tc.payload))
 			if err == nil {
 				t.Fatalf("expected normalize error")
 			}
@@ -183,15 +184,23 @@ Validates:
   - Invalid type and range are rejected
 */
 func TestNormalizeServicesSSHPort(t *testing.T) {
-	defaultServices, err := normalizeServices(mustRoot(t, `{}`))
+	defaultServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{}`))
 	if err != nil {
 		t.Fatalf("normalize default ssh: %v", err)
 	}
-	if defaultServices.SSHPort != 22 {
-		t.Fatalf("expected default SSH port 22, got %d", defaultServices.SSHPort)
+	if defaultServices.SSHEnabled || defaultServices.SSHPort != 0 {
+		t.Fatalf("expected absent SSH to render nothing, got %#v", defaultServices)
 	}
 
-	explicitServices, err := normalizeServices(mustRoot(t, `{"services": {"ssh": {"port": 2222}}}`))
+	emptySSHServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {}}}`))
+	if err != nil {
+		t.Fatalf("normalize empty ssh: %v", err)
+	}
+	if !emptySSHServices.SSHEnabled || emptySSHServices.SSHPort != 22 {
+		t.Fatalf("expected explicit empty SSH to default to 22, got %#v", emptySSHServices)
+	}
+
+	explicitServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {"port": 2222}}}`))
 	if err != nil {
 		t.Fatalf("normalize explicit ssh: %v", err)
 	}
@@ -204,9 +213,100 @@ func TestNormalizeServicesSSHPort(t *testing.T) {
 		`{"services": {"ssh": {"port": 0}}}`,
 		`{"services": {"ssh": {"port": 65536}}}`,
 	} {
-		if _, err := normalizeServices(mustRoot(t, payload)); err == nil {
+		if _, err := normalizeServicesFromRoot(t, mustRoot(t, payload)); err == nil {
 			t.Fatalf("expected invalid SSH port to fail for %s", payload)
 		}
+	}
+}
+
+/*
+TC-SERVICE-DHCP-001
+Type: Mixed
+Title: DHCP reserved range rejection
+Summary:
+Checks DHCP range safety around reserved IPv4 addresses. Ranges must stay in
+the subnet and must not include the router IP, network address, or broadcast
+address.
+
+Validates:
+  - Router IP overlap is rejected
+  - Network and broadcast address overlap is rejected
+  - A normal default range remains valid
+*/
+func TestNormalizeServicesRejectsReservedDHCPRanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{
+			name:    "router IP overlap",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-first": 1, "lease-count": 1}`),
+			wantErr: true,
+		},
+		{
+			name:    "default range valid",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24"`),
+			wantErr: false,
+		},
+		{
+			name:    "broadcast overlap",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-first": 250, "lease-count": 6}`),
+			wantErr: true,
+		},
+		{
+			name:    "tiny subnet no safe default range",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/31"`),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeServicesFromRoot(t, mustRoot(t, tc.payload))
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected normalize error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected normalize error: %v", err)
+			}
+		})
+	}
+}
+
+/*
+TC-SERVICE-DHCP-002
+Type: Negative
+Title: DHCP helper rejects reserved addresses
+Summary:
+Exercises the numeric range validator directly for reserved addresses that are
+not all reachable through positive lease-first payloads. This keeps network and
+broadcast checks covered without loosening input validation.
+
+Validates:
+  - Network address overlap is rejected
+  - Broadcast address overlap is rejected
+  - Numeric IPv4 comparisons are used instead of string ordering
+*/
+func TestValidateDHCPRangeRejectsNetworkAndBroadcast(t *testing.T) {
+	prefix := mustPrefix(t, "192.168.50.0/24")
+	lanIP := mustAddr(t, "192.168.50.1")
+
+	tests := []struct {
+		name  string
+		start string
+		stop  string
+	}{
+		{name: "network", start: "192.168.50.0", stop: "192.168.50.10"},
+		{name: "broadcast", start: "192.168.50.250", stop: "192.168.50.255"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDHCPRange(prefix, lanIP, mustAddr(t, tc.start), mustAddr(t, tc.stop))
+			if err == nil {
+				t.Fatalf("expected reserved range error")
+			}
+		})
 	}
 }
 
@@ -217,4 +317,45 @@ func mustRoot(t *testing.T, payload string) map[string]json.RawMessage {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	return root
+}
+
+func mustPrefix(t *testing.T, value string) netip.Prefix {
+	t.Helper()
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		t.Fatalf("parse prefix %q: %v", value, err)
+	}
+	return prefix
+}
+
+func mustAddr(t *testing.T, value string) netip.Addr {
+	t.Helper()
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		t.Fatalf("parse addr %q: %v", value, err)
+	}
+	return addr
+}
+
+func normalizeServicesFromRoot(t *testing.T, root map[string]json.RawMessage) (ServiceSection, error) {
+	t.Helper()
+	interfaces, err := normalizeInterfaces(root, map[string][]string{
+		"WAN*": {"eth0"},
+		"LAN*": {"eth1", "eth2"},
+		"LAN1": {"eth1"},
+		"LAN2": {"eth2"},
+	})
+	if err != nil {
+		return ServiceSection{}, err
+	}
+	return normalizeServices(root, interfaces.ServiceLANInputs)
+}
+
+func servicePayloadWithDHCP(ipv4Fields string) string {
+	return `{"interfaces": [{
+		"name": "LAN",
+		"role": "downstream",
+		"ethernet": [{"select-ports": ["LAN*"]}],
+		"ipv4": {"addressing": "static", ` + ipv4Fields + `}
+	}]}`
 }

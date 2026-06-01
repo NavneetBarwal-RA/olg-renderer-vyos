@@ -182,37 +182,84 @@ func TestParseCommandsRejectsUnsupportedSetPaths(t *testing.T) {
 /*
 TC-APPLY-SERVICE-001
 Type: Mixed
-Title: Service set path allowlist
+Title: Exact service command allowlist
 Summary:
-Checks the service commands emitted by the renderer are accepted by Prepare
-while unsupported service paths remain protected. SSH is intentionally limited
-to the concrete port path.
+Checks the exact service command shapes emitted by the renderer. The parser
+should accept DHCP, DNS forwarding, and SSH port commands while keeping service
+validation narrow.
 
 Validates:
-  - service dhcp-server set commands are accepted
-  - service dns forwarding set commands are accepted
-  - service ssh port is accepted and unsupported SSH/service paths are rejected
+  - Renderer DHCP command shapes are accepted
+  - Renderer DNS forwarding command shapes are accepted
+  - Renderer SSH port command shape is accepted
 */
 func TestParseCommandsAllowsRendererServicePaths(t *testing.T) {
 	input := stringsJoinLines(
 		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option default-router 192.168.50.1",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option name-server 192.168.50.1",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option domain-name vyos.net",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 start 192.168.50.10",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 stop 192.168.50.137",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id 4052",
 		"set service dns forwarding allow-from 192.168.50.0/24",
+		"set service dns forwarding cache-size 0",
+		"set service dns forwarding listen-address 192.168.50.1",
 		"set service ssh port 22",
 	)
 	got, err := parseCommands(input)
 	assertNoApplyError(t, err)
 	assertStringSlicesEqual(t, got, []string{
 		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option default-router 192.168.50.1",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option name-server 192.168.50.1",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option domain-name vyos.net",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 start 192.168.50.10",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 stop 192.168.50.137",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id 4052",
 		"set service dns forwarding allow-from 192.168.50.0/24",
+		"set service dns forwarding cache-size 0",
+		"set service dns forwarding listen-address 192.168.50.1",
 		"set service ssh port 22",
 	})
+}
 
-	for _, input := range []string{
+/*
+TC-APPLY-SERVICE-002
+Type: Negative
+Title: Unsupported service command rejection
+Summary:
+Passes broad or unsupported service subpaths that are not emitted by the
+renderer. The apply parser must reject them before planning or executor use.
+
+Validates:
+  - Broad DHCP and DNS service paths are rejected
+  - Unsupported SSH subcommands are rejected
+  - Invalid IP, prefix, and integer fields are rejected
+*/
+func TestParseCommandsRejectsUnsupportedServicePaths(t *testing.T) {
+	tests := []string{
+		"set service dhcp-server global-parameters 'option foo'",
+		"set service dhcp-server shared-network-name LAN authoritative",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option router 192.168.50.1",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option default-router 2001:db8::1",
+		"set service dhcp-server shared-network-name LAN subnet 2001:db8::/64 lease 21600",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 0",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 1 start 192.168.50.10",
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id 0",
+		"set service dns forwarding system",
+		"set service dns forwarding name-server 1.1.1.1",
+		"set service dns forwarding allow-from 2001:db8::/64",
+		"set service dns forwarding cache-size 1",
+		"set service dns forwarding listen-address 2001:db8::1",
 		"set service ssh port 0",
 		"set service ssh port 65536",
-		"set service dns cache-size 0",
+		"set service ssh disable-password-authentication",
+		"set service ssh listen-address 192.168.1.1",
 		"set service ntp server pool.ntp.org",
-	} {
+		"set service",
+	}
+	for _, input := range tests {
 		_, err := parseCommands(input)
 		assertApplyCode(t, err, CodeInvalidCommand)
 	}

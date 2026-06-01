@@ -2,6 +2,7 @@ package apply
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"unicode"
@@ -135,25 +136,115 @@ func validateInterfacesSetPath(tokens []string) error {
 func validateServiceSetPath(tokens []string) error {
 	switch tokens[2] {
 	case "dhcp-server":
-		if len(tokens) >= 4 {
-			return nil
-		}
-		return fmt.Errorf("service dhcp-server path is too short")
+		return validateServiceDHCPSetPath(tokens)
 	case "dns":
-		if len(tokens) >= 5 && tokens[3] == "forwarding" {
-			return nil
-		}
-		return fmt.Errorf("service dns path must be dns forwarding")
+		return validateServiceDNSSetPath(tokens)
 	case "ssh":
 		if len(tokens) != 5 || tokens[3] != "port" {
 			return fmt.Errorf("service ssh supports only port")
 		}
-		port, err := strconv.Atoi(tokens[4])
-		if err != nil || port < 1 || port > 65535 {
+		port, err := parsePositiveIntToken(tokens[4])
+		if err != nil || port > 65535 {
 			return fmt.Errorf("service ssh port must be in range 1..65535")
 		}
 		return nil
 	default:
 		return fmt.Errorf("service path %q is not supported", tokens[2])
 	}
+}
+
+func validateServiceDHCPSetPath(tokens []string) error {
+	if len(tokens) < 8 || tokens[3] != "shared-network-name" || tokens[4] == "" || tokens[5] != "subnet" {
+		return fmt.Errorf("service dhcp-server path must use shared-network-name <name> subnet <cidr>")
+	}
+	if err := validateIPv4PrefixToken(tokens[6]); err != nil {
+		return err
+	}
+
+	switch tokens[7] {
+	case "lease":
+		if len(tokens) != 9 {
+			return fmt.Errorf("service dhcp-server lease command has invalid shape")
+		}
+		if _, err := parsePositiveIntToken(tokens[8]); err != nil {
+			return fmt.Errorf("service dhcp-server lease must be positive integer")
+		}
+		return nil
+	case "option":
+		if len(tokens) != 10 {
+			return fmt.Errorf("service dhcp-server option command has invalid shape")
+		}
+		switch tokens[8] {
+		case "default-router", "name-server":
+			return validateIPv4AddrToken(tokens[9])
+		case "domain-name":
+			if tokens[9] != "vyos.net" {
+				return fmt.Errorf("service dhcp-server domain-name must be vyos.net")
+			}
+			return nil
+		default:
+			return fmt.Errorf("service dhcp-server option %q is not supported", tokens[8])
+		}
+	case "range":
+		if len(tokens) != 11 || tokens[8] != "0" {
+			return fmt.Errorf("service dhcp-server range command has invalid shape")
+		}
+		if tokens[9] != "start" && tokens[9] != "stop" {
+			return fmt.Errorf("service dhcp-server range supports only start or stop")
+		}
+		return validateIPv4AddrToken(tokens[10])
+	case "subnet-id":
+		if len(tokens) != 9 {
+			return fmt.Errorf("service dhcp-server subnet-id command has invalid shape")
+		}
+		if _, err := parsePositiveIntToken(tokens[8]); err != nil {
+			return fmt.Errorf("service dhcp-server subnet-id must be positive integer")
+		}
+		return nil
+	default:
+		return fmt.Errorf("service dhcp-server command %q is not supported", tokens[7])
+	}
+}
+
+func validateServiceDNSSetPath(tokens []string) error {
+	if len(tokens) != 6 || tokens[3] != "forwarding" {
+		return fmt.Errorf("service dns path must be dns forwarding")
+	}
+	switch tokens[4] {
+	case "allow-from":
+		return validateIPv4PrefixToken(tokens[5])
+	case "cache-size":
+		if tokens[5] != "0" {
+			return fmt.Errorf("service dns forwarding cache-size must be 0")
+		}
+		return nil
+	case "listen-address":
+		return validateIPv4AddrToken(tokens[5])
+	default:
+		return fmt.Errorf("service dns forwarding command %q is not supported", tokens[4])
+	}
+}
+
+func validateIPv4PrefixToken(token string) error {
+	prefix, err := netip.ParsePrefix(token)
+	if err != nil || !prefix.Addr().Is4() {
+		return fmt.Errorf("expected IPv4 prefix")
+	}
+	return nil
+}
+
+func validateIPv4AddrToken(token string) error {
+	addr, err := netip.ParseAddr(token)
+	if err != nil || !addr.Is4() {
+		return fmt.Errorf("expected IPv4 address")
+	}
+	return nil
+}
+
+func parsePositiveIntToken(token string) (int, error) {
+	value, err := strconv.Atoi(token)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("expected positive integer")
+	}
+	return value, nil
 }

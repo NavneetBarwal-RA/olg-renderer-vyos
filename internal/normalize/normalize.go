@@ -53,8 +53,9 @@ type RenderData struct {
 
 // InterfacesSection contains normalized interface render data.
 type InterfacesSection struct {
-	Bridges   []Bridge
-	Ethernets []Ethernet
+	Bridges          []Bridge
+	Ethernets        []Ethernet
+	ServiceLANInputs []ServiceLANInput
 }
 
 // Bridge describes one normalized VyOS bridge.
@@ -80,6 +81,16 @@ type Ethernet struct {
 	Description string
 }
 
+// ServiceLANInput describes an accepted downstream static interface for service normalization.
+type ServiceLANInput struct {
+	InputIndex int
+	Name       string
+	Subnet     string
+	DHCP       rawDHCP
+	IsVLAN     bool
+	VLANID     int
+}
+
 // NATSection contains normalized source NAT rules.
 type NATSection struct {
 	Rules []NATRule
@@ -95,8 +106,9 @@ type NATRule struct {
 
 // ServiceSection contains normalized service render data.
 type ServiceSection struct {
-	LANs    []ServiceLAN
-	SSHPort int
+	LANs       []ServiceLAN
+	SSHEnabled bool
+	SSHPort    int
 }
 
 // ServiceLAN describes one downstream IPv4 LAN used by DHCP and DNS forwarding services.
@@ -122,7 +134,7 @@ func Normalize(root map[string]json.RawMessage, portMap map[string][]string) (Re
 		return RenderData{}, err
 	}
 
-	services, err := normalizeServices(root)
+	services, err := normalizeServices(root, interfaces.ServiceLANInputs)
 	if err != nil {
 		return RenderData{}, err
 	}

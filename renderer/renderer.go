@@ -150,6 +150,9 @@ func (r *Renderer) Render(ctx context.Context, input Input) (Output, error) {
 	if err != nil {
 		return Output{}, newError(CodeTemplateFailed, "failed to render templates", err)
 	}
+	if strings.TrimSpace(renderedText) == "" {
+		return Output{}, newError(CodeMissingConfig, "payload contains no renderable config", nil)
+	}
 
 	return Output{
 		Target:        input.Target,

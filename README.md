@@ -339,12 +339,12 @@ The apply parser is line-based and quote-aware. It normalizes CRLF, trims each l
 set interfaces bridge ...
 set nat source ...
 set interfaces ethernet <name> description ...
-set service dhcp-server ...
-set service dns forwarding ...
+set service dhcp-server shared-network-name <name> subnet <cidr> <renderer-emitted DHCP leaf>
+set service dns forwarding <allow-from|cache-size|listen-address> <value>
 set service ssh port <port>
 ```
 
-Commands such as `commit`, `save`, `delete`, `show`, `set system ...`, broad or unsupported `set service ...`, and unsupported ethernet changes are rejected before any executor call.
+Service command validation is intentionally narrow: unsupported DHCP/DNS/SSH subcommands and broad service paths are rejected before any executor call. Commands such as `commit`, `save`, `delete`, `show`, `set system ...`, broad or unsupported `set service ...`, and unsupported ethernet changes are also rejected.
 
 ### Executor contract
 
@@ -800,6 +800,8 @@ ipv4.addressing == static
 ipv4.subnet is an IPv4 prefix
 ```
 
+The service LAN list is carried forward from normalized interface handling so service rendering cannot accept a LAN that interface rendering rejected.
+
 For each LAN, `ipv4.subnet` such as `192.168.50.1/24` is normalized to:
 
 ```text
@@ -817,6 +819,8 @@ lease-count = 100
 
 Optional DHCP inputs are read from `interfaces[].ipv4.dhcp.lease-time`, `lease-first`, and `lease-count`. `lease-time` accepts seconds as a number, a numeric string, or duration strings with `s`, `m`, `h`, or `d` suffixes. `lease-first` and `lease-count` must be positive integers.
 
+DHCP ranges must stay inside the IPv4 subnet and must not include the LAN/router IP, network address, or broadcast address.
+
 Rendered service commands include:
 
 ```text
@@ -832,7 +836,7 @@ set service dns forwarding listen-address 192.168.50.1
 set service ssh port 22
 ```
 
-`services.ssh.port` controls the SSH port. If it is absent, the renderer emits `set service ssh port 22`. Valid SSH ports are integers in `1..65535`.
+An explicit `services.ssh` object controls SSH port rendering. If `services.ssh` is present without `port`, the renderer emits `set service ssh port 22`. If `services.ssh` is absent, no SSH command is emitted. Valid SSH ports are integers in `1..65535`.
 
 Service render order is after interfaces and before NAT:
 

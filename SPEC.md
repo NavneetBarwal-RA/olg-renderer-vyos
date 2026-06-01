@@ -557,6 +557,8 @@ ipv4.addressing == static
 ipv4.subnet is a non-empty IPv4 prefix
 ```
 
+Service LAN derivation follows normalized interface handling. A LAN is available to service rendering only if the same interface entry was accepted by interface normalization.
+
 IPv6 service subnets are not supported for MVP and must fail normalization when selected as service LANs.
 
 For `ipv4.subnet` such as `192.168.50.1/24`, normalization computes:
@@ -591,7 +593,7 @@ range_start = net_ip + lease_first
 range_stop  = range_start + lease_count - 1
 ```
 
-The range must remain inside the IPv4 subnet.
+The range must remain inside the IPv4 subnet and must not include the LAN/router IP, network address, or broadcast address.
 
 Subnet ID:
 
@@ -625,7 +627,7 @@ set service dhcp-server shared-network-name <name> subnet <net_ip_prefix> option
 
 For multiple LANs, DNS forwarding renders all `allow-from` lines in deterministic LAN order, one `cache-size 0` line, then all `listen-address` lines in deterministic LAN order.
 
-`services.ssh.port` controls SSH. If it is absent, the renderer emits default port 22. Valid SSH ports are integers in `1..65535`.
+An explicit `services.ssh` object controls SSH rendering. If `services.ssh` is present without `port`, the renderer emits default port 22. If `services.ssh` is absent, no SSH command is emitted. Valid SSH ports are integers in `1..65535`.
 
 HTTPS, API keys, certificates, allow-client, broad service reset, and `service ssh` reset are out of scope.
 
@@ -1325,8 +1327,16 @@ MVP command path allowlist:
 set interfaces bridge ...
 set interfaces ethernet <name> description ...
 set nat source ...
-set service dhcp-server ...
-set service dns forwarding ...
+set service dhcp-server shared-network-name <name> subnet <cidr> lease <seconds>
+set service dhcp-server shared-network-name <name> subnet <cidr> option default-router <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> option name-server <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> option domain-name vyos.net
+set service dhcp-server shared-network-name <name> subnet <cidr> range 0 start <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> range 0 stop <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> subnet-id <positive-int>
+set service dns forwarding allow-from <cidr>
+set service dns forwarding cache-size 0
+set service dns forwarding listen-address <ipv4>
 set service ssh port <port>
 ```
 
@@ -1336,8 +1346,8 @@ Rules:
 - `set interfaces bridge ...` is allowed because `interfaces bridge` is a managed root.
 - `set nat source ...` is allowed because `nat source` is a managed root.
 - `set interfaces ethernet <name> description ...` is allowed because renderer may set ethernet descriptions while `interfaces ethernet` is unmanaged and preserved from broad deletion.
-- `set service dhcp-server ...` is allowed because `service dhcp-server` is a managed root.
-- `set service dns forwarding ...` is allowed because `service dns forwarding` is a managed root.
+- Exact renderer-emitted `set service dhcp-server ...` forms are allowed because `service dhcp-server` is a managed root.
+- Exact renderer-emitted `set service dns forwarding ...` forms are allowed because `service dns forwarding` is a managed root.
 - `set service ssh port <port>` is allowed as a narrow management setting, but `service ssh` is not reset by default.
 - Other `set ...` roots must be rejected until explicitly supported by renderer/apply policy.
 ```
@@ -1895,6 +1905,8 @@ Required:
 - optional payload metadata mismatch
 - interface normalization
 - service DHCP/DNS/SSH normalization
+- service SSH is emitted only when `services.ssh` is explicit
+- DHCP ranges overlapping router, network, or broadcast addresses are rejected
 - NAT canonical field handling
 - renderer rejects empty desired config with UUID-only payload
 - renderer rejects desired config with no renderable upstream interface
@@ -1945,6 +1957,7 @@ Required:
 - command parser handles blank lines and trailing spaces
 - comment lines are rejected
 - non-allowlisted set paths are rejected
+- service command parser accepts only exact renderer-emitted DHCP/DNS/SSH forms
 - executor is not called when command validation fails
 - Prepare rejects unsafe commands
 - Prepare returns deterministic managed-root delete/set plan

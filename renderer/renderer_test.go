@@ -196,16 +196,17 @@ func TestRenderInvalidJSON(t *testing.T) {
 
 /*
 TC-INPUT-003
-Type: Positive
+Type: Negative
 Title: Wrapper payload is not unwrapped
 Summary:
 Documents the canonical payload contract by passing a non-canonical wrapper
 object with config.interfaces inside it. The renderer should treat the wrapper
-as the payload root and should not render nested config data.
+as the payload root and reject it as missing renderable config.
 
 Validates:
   - Renderer expects top-level interfaces and nat
   - Wrapper payloads under $.config are not unwrapped
+  - Wrapper payloads do not render default SSH-only output
   - Agent adapters must pass the inner config object
 */
 func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
@@ -214,7 +215,7 @@ func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
 		t.Fatalf("new renderer: %v", err)
 	}
 
-	out, err := r.Render(context.Background(), Input{
+	_, err = r.Render(context.Background(), Input{
 		Target:        "vyos",
 		ConfigUUID:    "cfg-1",
 		SchemaName:    "olg-ucentral",
@@ -242,15 +243,7 @@ func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
 			}
 		}`),
 	})
-	if err != nil {
-		t.Fatalf("render failed: %v", err)
-	}
-	if strings.Contains(out.RenderedText, "set interfaces") || strings.Contains(out.RenderedText, "set nat") {
-		t.Fatalf("expected wrapper payload not to render nested config, got:\n%s", out.RenderedText)
-	}
-	if out.RenderedText != "set service ssh port 22\n" {
-		t.Fatalf("expected only default SSH service output, got:\n%s", out.RenderedText)
-	}
+	assertErrorCode(t, err, CodeMissingConfig)
 }
 
 /*
@@ -902,6 +895,87 @@ func TestRenderServiceCommandsAndOrder(t *testing.T) {
 			t.Fatalf("expected %q after previous line\n%s", line, out.RenderedText)
 		}
 		last = idx
+	}
+}
+
+/*
+TC-SERVICE-RENDER-001
+Type: Mixed
+Title: SSH explicit rendering
+Summary:
+Verifies SSH service output is rendered only when services.ssh is explicitly
+present. An empty services.ssh object renders the default port while an absent
+services.ssh object does not emit SSH by itself.
+
+Validates:
+  - Absent services.ssh emits no SSH command
+  - Explicit empty services.ssh emits port 22
+  - Explicit services.ssh.port emits the configured port
+*/
+func TestRenderSSHRequiresExplicitService(t *testing.T) {
+	tests := []struct {
+		name      string
+		services  string
+		wantSSH   string
+		wantNoSSH bool
+	}{
+		{name: "absent ssh", services: `"services": {}`, wantNoSSH: true},
+		{name: "empty ssh", services: `"services": {"ssh": {}}`, wantSSH: "set service ssh port 22\n"},
+		{name: "explicit ssh port", services: `"services": {"ssh": {"port": 2222}}`, wantSSH: "set service ssh port 2222\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := renderPayload(t, []byte(`{
+				"interfaces": [{
+					"ethernet": [{"select-ports": ["WAN*"]}],
+					"ipv4": {"addressing": "dynamic"},
+					"name": "WAN",
+					"role": "upstream"
+				}],
+				`+tc.services+`
+			}`))
+			if err != nil {
+				t.Fatalf("render failed: %v", err)
+			}
+			if tc.wantNoSSH && strings.Contains(out.RenderedText, "set service ssh") {
+				t.Fatalf("did not expect SSH output:\n%s", out.RenderedText)
+			}
+			if tc.wantSSH != "" && !strings.Contains(out.RenderedText, tc.wantSSH) {
+				t.Fatalf("expected SSH output %q in:\n%s", tc.wantSSH, out.RenderedText)
+			}
+		})
+	}
+}
+
+/*
+TC-SERVICE-RENDER-002
+Type: Negative
+Title: Empty payload rejects SSH-only output
+Summary:
+Checks that default SSH behavior cannot make empty or non-renderable payloads
+look successful. Only an explicit services.ssh object may produce SSH output.
+
+Validates:
+  - Empty payload returns missing_config
+  - services without ssh returns missing_config
+  - No SSH-only output is rendered for absent services.ssh
+*/
+func TestRenderRejectsEmptyPayloadWithoutExplicitSSH(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"services": {}}`),
+	} {
+		_, err := renderPayload(t, payload)
+		assertErrorCode(t, err, CodeMissingConfig)
+	}
+
+	out, err := renderPayload(t, []byte(`{"services": {"ssh": {}}}`))
+	if err != nil {
+		t.Fatalf("explicit ssh render failed: %v", err)
+	}
+	if out.RenderedText != "set service ssh port 22\n" {
+		t.Fatalf("unexpected explicit ssh output:\n%s", out.RenderedText)
 	}
 }
 
