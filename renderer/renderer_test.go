@@ -954,17 +954,20 @@ Type: Negative
 Title: Empty payload rejects SSH-only output
 Summary:
 Checks that default SSH behavior cannot make empty or non-renderable payloads
-look successful. Only an explicit services.ssh object may produce SSH output.
+look successful. Only an explicit services.ssh object may produce SSH output,
+and wrapper payloads remain non-renderable at the top level.
 
 Validates:
   - Empty payload returns missing_config
   - services without ssh returns missing_config
+  - Wrapper payload returns missing_config
   - No SSH-only output is rendered for absent services.ssh
 */
 func TestRenderRejectsEmptyPayloadWithoutExplicitSSH(t *testing.T) {
 	for _, payload := range [][]byte{
 		[]byte(`{}`),
 		[]byte(`{"services": {}}`),
+		[]byte(`{"config": {"interfaces": [{"ethernet": [{"select-ports": ["WAN*"]}], "ipv4": {"addressing": "dynamic"}, "name": "WAN", "role": "upstream"}]}}`),
 	} {
 		_, err := renderPayload(t, payload)
 		assertErrorCode(t, err, CodeMissingConfig)

@@ -627,7 +627,15 @@ set service dhcp-server shared-network-name <name> subnet <net_ip_prefix> option
 
 For multiple LANs, DNS forwarding renders all `allow-from` lines in deterministic LAN order, one `cache-size 0` line, then all `listen-address` lines in deterministic LAN order.
 
-An explicit `services.ssh` object controls SSH rendering. If `services.ssh` is present without `port`, the renderer emits default port 22. If `services.ssh` is absent, no SSH command is emitted. Valid SSH ports are integers in `1..65535`.
+SSH rendering is explicit-only:
+
+```text
+absent services.ssh       -> no SSH output
+services.ssh: {}          -> set service ssh port 22
+services.ssh.port: 2222   -> set service ssh port 2222
+```
+
+Valid SSH ports are integers in `1..65535`.
 
 HTTPS, API keys, certificates, allow-client, broad service reset, and `service ssh` reset are out of scope.
 

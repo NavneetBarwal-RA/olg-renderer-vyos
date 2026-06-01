@@ -175,12 +175,14 @@ TC-SERVICE-NORMALIZE-004
 Type: Mixed
 Title: SSH port normalization
 Summary:
-Checks the default SSH port behavior and explicit services.ssh.port parsing.
-Invalid types and out-of-range values fail with normalize errors.
+Checks SSH normalization for absent and explicit services.ssh objects.
+Only an explicit services.ssh object may enable default port 22 behavior.
+Invalid port types and out-of-range values fail with normalize errors.
 
 Validates:
-  - Missing services.ssh.port defaults to 22
-  - Explicit valid SSH port is used
+  - Absent services.ssh emits no SSH service data
+  - Explicit services.ssh:{} defaults to port 22
+  - Explicit services.ssh.port uses the configured port
   - Invalid type and range are rejected
 */
 func TestNormalizeServicesSSHPort(t *testing.T) {

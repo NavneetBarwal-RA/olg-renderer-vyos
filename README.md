@@ -836,7 +836,15 @@ set service dns forwarding listen-address 192.168.50.1
 set service ssh port 22
 ```
 
-An explicit `services.ssh` object controls SSH port rendering. If `services.ssh` is present without `port`, the renderer emits `set service ssh port 22`. If `services.ssh` is absent, no SSH command is emitted. Valid SSH ports are integers in `1..65535`.
+SSH rendering is explicit-only:
+
+```text
+absent services.ssh       -> no SSH output
+services.ssh: {}          -> set service ssh port 22
+services.ssh.port: 2222   -> set service ssh port 2222
+```
+
+Valid SSH ports are integers in `1..65535`.
 
 Service render order is after interfaces and before NAT:
 
