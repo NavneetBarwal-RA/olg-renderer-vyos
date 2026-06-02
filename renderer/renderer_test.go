@@ -206,7 +206,7 @@ as the payload root and reject it as missing renderable config.
 Validates:
   - Renderer expects top-level interfaces and nat
   - Wrapper payloads under $.config are not unwrapped
-  - Wrapper payloads do not render default SSH-only output
+  - Wrapper payloads do not render SSH-only output
   - Agent adapters must pass the inner config object
 */
 func TestRenderDoesNotUnwrapConfigWrapper(t *testing.T) {
@@ -619,7 +619,7 @@ func TestRenderRejectsVLANWithoutDownstreamBridge(t *testing.T) {
 		"interfaces": [
 			{
 				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10",
 				"role": "downstream",
 				"vlan": {"id": 10}
@@ -650,20 +650,20 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 		"interfaces": [
 			{
 				"ethernet": [{"select-ports": ["LAN*"]}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN",
 				"role": "downstream"
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10A",
 				"role": "downstream",
 				"vlan": {"id": 10}
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.2/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.2/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10B",
 				"role": "downstream",
 				"vlan": {"id": 10}
@@ -724,27 +724,27 @@ func TestRenderAllowedVLANsPerMemberInterface(t *testing.T) {
 		"interfaces": [
 			{
 				"ethernet": [{"select-ports": ["LAN*"]}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN",
 				"role": "downstream"
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10",
 				"role": "downstream",
 				"vlan": {"id": 10}
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.20.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.20.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.20",
 				"role": "downstream",
 				"vlan": {"id": 20}
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN*"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.30.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.30.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.30",
 				"role": "downstream",
 				"vlan": {"id": 30}
@@ -801,14 +801,14 @@ func TestRenderEthernetDescriptionPrefersBaseInterface(t *testing.T) {
 		"interfaces": [
 			{
 				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10",
 				"role": "downstream",
 				"vlan": {"id": 10}
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN1"]}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN",
 				"role": "downstream"
 			}
@@ -852,7 +852,7 @@ func TestRenderServiceCommandsAndOrder(t *testing.T) {
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN*"]}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"},
+				"ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN",
 				"role": "downstream"
 			}
@@ -904,13 +904,12 @@ Type: Mixed
 Title: SSH explicit rendering
 Summary:
 Verifies SSH service output is rendered only when services.ssh is explicitly
-present. An empty services.ssh object renders the default port while an absent
-services.ssh object does not emit SSH by itself.
+configured with a port. Empty or absent services.ssh objects do not emit SSH.
 
 Validates:
   - Absent services.ssh emits no SSH command
-  - Explicit empty services.ssh emits port 22
-  - Explicit services.ssh.port emits the configured port
+  - Explicit empty services.ssh emits no SSH command
+  - Explicit services.ssh.port 22 and 2222 emit the configured port
 */
 func TestRenderSSHRequiresExplicitService(t *testing.T) {
 	tests := []struct {
@@ -920,7 +919,8 @@ func TestRenderSSHRequiresExplicitService(t *testing.T) {
 		wantNoSSH bool
 	}{
 		{name: "absent ssh", services: `"services": {}`, wantNoSSH: true},
-		{name: "empty ssh", services: `"services": {"ssh": {}}`, wantSSH: "set service ssh port 22\n"},
+		{name: "empty ssh", services: `"services": {"ssh": {}}`, wantNoSSH: true},
+		{name: "explicit ssh port 22", services: `"services": {"ssh": {"port": 22}}`, wantSSH: "set service ssh port 22\n"},
 		{name: "explicit ssh port", services: `"services": {"ssh": {"port": 2222}}`, wantSSH: "set service ssh port 2222\n"},
 	}
 
@@ -951,34 +951,28 @@ func TestRenderSSHRequiresExplicitService(t *testing.T) {
 /*
 TC-SERVICE-RENDER-002
 Type: Negative
-Title: Empty payload rejects SSH-only output
+Title: Empty payload remains non-renderable
 Summary:
-Checks that default SSH behavior cannot make empty or non-renderable payloads
-look successful. Only an explicit services.ssh object may produce SSH output,
-and wrapper payloads remain non-renderable at the top level.
+Checks that empty or non-renderable payloads still return missing_config.
+Empty services.ssh objects must not create standalone renderer output, and
+wrapper payloads remain non-renderable at the top level.
 
 Validates:
   - Empty payload returns missing_config
   - services without ssh returns missing_config
+  - services.ssh:{} returns missing_config
   - Wrapper payload returns missing_config
-  - No SSH-only output is rendered for absent services.ssh
+  - No SSH-only output is rendered for empty services.ssh
 */
-func TestRenderRejectsEmptyPayloadWithoutExplicitSSH(t *testing.T) {
+func TestRenderRejectsNonRenderablePayloads(t *testing.T) {
 	for _, payload := range [][]byte{
 		[]byte(`{}`),
 		[]byte(`{"services": {}}`),
+		[]byte(`{"services": {"ssh": {}}}`),
 		[]byte(`{"config": {"interfaces": [{"ethernet": [{"select-ports": ["WAN*"]}], "ipv4": {"addressing": "dynamic"}, "name": "WAN", "role": "upstream"}]}}`),
 	} {
 		_, err := renderPayload(t, payload)
 		assertErrorCode(t, err, CodeMissingConfig)
-	}
-
-	out, err := renderPayload(t, []byte(`{"services": {"ssh": {}}}`))
-	if err != nil {
-		t.Fatalf("explicit ssh render failed: %v", err)
-	}
-	if out.RenderedText != "set service ssh port 22\n" {
-		t.Fatalf("unexpected explicit ssh output:\n%s", out.RenderedText)
 	}
 }
 

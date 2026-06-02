@@ -11,10 +11,8 @@ import (
 )
 
 const (
-	defaultDHCPLeaseSecs  = 21600
-	defaultDHCPLeaseFirst = 10
-	defaultDHCPLeaseCount = 100
-	defaultSSHPort        = 22
+	minServicePort = 1
+	maxServicePort = 65535
 )
 
 type rawSSHService struct {
@@ -66,14 +64,14 @@ func normalizeSSHPort(root map[string]json.RawMessage) (int, bool, error) {
 		return 0, false, newError(CodeNormalizeFailed, "services.ssh must be an object", err)
 	}
 	if len(ssh.Port) == 0 {
-		return defaultSSHPort, true, nil
+		return 0, false, nil
 	}
 
 	port, err := parseJSONInt(ssh.Port)
 	if err != nil {
 		return 0, false, newError(CodeNormalizeFailed, "services.ssh.port must be an integer", err)
 	}
-	if port < 1 || port > 65535 {
+	if port < minServicePort || port > maxServicePort {
 		return 0, false, newError(CodeNormalizeFailed, "services.ssh.port must be in range 1..65535", nil)
 	}
 	return port, true, nil
@@ -141,11 +139,11 @@ func normalizeServiceLAN(input ServiceLANInput) (ServiceLAN, error) {
 	if err != nil {
 		return ServiceLAN{}, fmt.Errorf("invalid ipv4.dhcp.lease-time: %v", err)
 	}
-	leaseFirst, err := parseOptionalPositiveInt(input.DHCP.LeaseFirst, defaultDHCPLeaseFirst, "ipv4.dhcp.lease-first")
+	leaseFirst, err := parseRequiredPositiveInt(input.DHCP.LeaseFirst, "ipv4.dhcp.lease-first")
 	if err != nil {
 		return ServiceLAN{}, err
 	}
-	leaseCount, err := parseOptionalPositiveInt(input.DHCP.LeaseCount, defaultDHCPLeaseCount, "ipv4.dhcp.lease-count")
+	leaseCount, err := parseRequiredPositiveInt(input.DHCP.LeaseCount, "ipv4.dhcp.lease-count")
 	if err != nil {
 		return ServiceLAN{}, err
 	}
@@ -207,7 +205,7 @@ func validateDHCPRange(prefix netip.Prefix, lanIP, rangeStart, rangeStop netip.A
 
 func parseLeaseTime(raw json.RawMessage) (int, error) {
 	if len(raw) == 0 {
-		return defaultDHCPLeaseSecs, nil
+		return 0, fmt.Errorf("must be specified")
 	}
 	if secs, err := parseJSONInt(raw); err == nil {
 		if secs < 1 {
@@ -262,9 +260,9 @@ func parseLeaseTimeString(value string) (int, error) {
 	return base * multiplier, nil
 }
 
-func parseOptionalPositiveInt(raw json.RawMessage, defaultValue int, path string) (int, error) {
+func parseRequiredPositiveInt(raw json.RawMessage, path string) (int, error) {
 	if len(raw) == 0 {
-		return defaultValue, nil
+		return 0, fmt.Errorf("%s is required", path)
 	}
 	value, err := parseJSONIntOrString(raw)
 	if err != nil {

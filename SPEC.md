@@ -146,6 +146,32 @@ internal/vyos/
 
 The public packages should expose stable APIs. Internal packages can evolve as needed.
 
+Renderer responsibilities:
+
+```text
+- expects fully resolved OLG/uCentral desired config
+- performs VyOS-specific validation
+- performs safety validation needed to prevent broken VyOS config
+- normalizes accepted config for deterministic rendering
+- renders deterministic VyOS set commands
+```
+
+Renderer does not:
+
+```text
+- apply schema defaults
+- complete partial configuration
+- infer intent from empty objects or omitted fields
+- duplicate upstream business logic
+```
+
+Defaulting ownership:
+
+```text
+- schema defaults are applied upstream by the ucentral client/adapter layer
+- renderer receives resolved config and must not inject missing values
+```
+
 ---
 
 ## 5. Public Renderer Facade
@@ -255,6 +281,8 @@ schema_version = 4.2.0
 ```
 
 Canonical `payload_json` is the raw OLG/uCentral config object.
+
+The payload must already be fully resolved by upstream layers. The renderer does not apply schema defaults or complete partial service data.
 
 Example shape:
 
@@ -568,15 +596,9 @@ lan_ip        = 192.168.50.1
 net_ip_prefix = 192.168.50.0/24
 ```
 
-DHCP defaults:
+The renderer expects fully resolved service input from upstream and does not apply schema defaults for service fields.
 
-```text
-lease_secs  = 21600
-lease_first = 10
-lease_count = 100
-```
-
-Optional DHCP input fields:
+Resolved DHCP input fields:
 
 ```text
 interfaces[].ipv4.dhcp.lease-time
@@ -584,7 +606,7 @@ interfaces[].ipv4.dhcp.lease-first
 interfaces[].ipv4.dhcp.lease-count
 ```
 
-`lease-time` accepts numeric seconds, numeric string seconds, or duration strings with `s`, `m`, `h`, or `d` suffix. `lease-first` and `lease-count` must parse to positive integers; zero and negative values are rejected.
+Each DHCP field must be present for every rendered service LAN. `lease-time` accepts numeric seconds, numeric string seconds, or duration strings with `s`, `m`, `h`, or `d` suffix. `lease-first` and `lease-count` must parse to positive integers; zero and negative values are rejected.
 
 DHCP range:
 
@@ -604,7 +626,7 @@ else:
   subnet_id = 4051 + original zero-based interfaces[] index
 ```
 
-For one LAN, rendered DHCP/DNS/SSH output is:
+For one LAN, rendered DHCP/DNS output is:
 
 ```text
 set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600
@@ -616,7 +638,6 @@ set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id
 set service dns forwarding allow-from 192.168.50.0/24
 set service dns forwarding cache-size 0
 set service dns forwarding listen-address 192.168.50.1
-set service ssh port 22
 ```
 
 If `subnet_id == 1`, DHCP output also includes:
@@ -631,7 +652,8 @@ SSH rendering is explicit-only:
 
 ```text
 absent services.ssh       -> no SSH output
-services.ssh: {}          -> set service ssh port 22
+services.ssh: {}          -> no SSH output
+services.ssh.port: 22     -> set service ssh port 22
 services.ssh.port: 2222   -> set service ssh port 2222
 ```
 
@@ -1913,7 +1935,7 @@ Required:
 - optional payload metadata mismatch
 - interface normalization
 - service DHCP/DNS/SSH normalization
-- service SSH is emitted only when `services.ssh` is explicit
+- service SSH is emitted only when `services.ssh.port` is explicit
 - DHCP ranges overlapping router, network, or broadcast addresses are rejected
 - NAT canonical field handling
 - renderer rejects empty desired config with UUID-only payload

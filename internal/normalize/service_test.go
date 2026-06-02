@@ -14,11 +14,11 @@ Title: Service LAN derivation
 Summary:
 Builds service LANs from downstream static IPv4 interfaces while ignoring
 interfaces that do not participate in DHCP and DNS forwarding. The test covers
-default lease/range math and subnet ID selection for base and VLAN LANs.
+explicit DHCP lease/range inputs and subnet ID selection for base and VLAN LANs.
 
 Validates:
   - Upstream, dynamic, and subnetless downstream interfaces are ignored
-  - LAN IP, network prefix, default lease, and range values are computed
+  - LAN IP, network prefix, explicit lease, and range values are computed
   - Subnet IDs use 4051 + input index for base LANs and VLAN ID for VLAN LANs
 */
 func TestNormalizeServicesDerivesLANs(t *testing.T) {
@@ -26,8 +26,8 @@ func TestNormalizeServicesDerivesLANs(t *testing.T) {
 		"interfaces": [
 			{"name": "WAN", "role": "upstream", "ethernet": [{"select-ports": ["WAN*"]}], "ipv4": {"addressing": "static", "subnet": "203.0.113.2/24"}},
 			{"name": "LAN-DHCP", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "dynamic"}},
-			{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}},
-			{"name": "LAN.10", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.10.1/24"}, "vlan": {"id": 10}}
+			{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+			{"name": "LAN.10", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}, "vlan": {"id": 10}}
 		]
 	}`)
 
@@ -73,7 +73,7 @@ with s, m, h, and d suffixes.
 Validates:
   - lease-time numbers and numeric strings parse as seconds
   - duration suffixes m, h, and d are converted to seconds
-  - lease-first and lease-count override default range math
+  - lease-first and lease-count drive range math explicitly
 */
 func TestNormalizeServicesParsesLeaseTimes(t *testing.T) {
 	tests := []struct {
@@ -130,7 +130,7 @@ invalid VyOS service commands. Normalization must fail before templating.
 
 Validates:
   - Invalid and IPv6 service subnets are rejected
-  - Invalid lease-time values are rejected
+  - Missing and invalid DHCP lease fields are rejected
   - Unsafe LAN names and out-of-subnet DHCP ranges are rejected
 */
 func TestNormalizeServicesRejectsInvalidLANInputs(t *testing.T) {
@@ -147,16 +147,28 @@ func TestNormalizeServicesRejectsInvalidLANInputs(t *testing.T) {
 			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "2001:db8::1/64"}}]}`,
 		},
 		{
+			name:    "missing lease time",
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-first": 10, "lease-count": 100}}}]}`,
+		},
+		{
+			name:    "missing lease first",
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-count": 100}}}]}`,
+		},
+		{
+			name:    "missing lease count",
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10}}}]}`,
+		},
+		{
 			name:    "invalid lease time",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": "soon"}}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": "soon", "lease-first": 10, "lease-count": 100}}}]}`,
 		},
 		{
 			name:    "unsafe LAN name",
-			payload: `{"interfaces": [{"name": "LAN bad", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24"}}]}`,
+			payload: `{"interfaces": [{"name": "LAN bad", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}}]}`,
 		},
 		{
 			name:    "range outside subnet",
-			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/30", "dhcp": {"lease-first": 10}}}]}`,
+			payload: `{"interfaces": [{"name": "LAN", "role": "downstream", "ethernet": [{"select-ports": ["LAN*"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/30", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}}]}`,
 		},
 	}
 
@@ -176,38 +188,47 @@ Type: Mixed
 Title: SSH port normalization
 Summary:
 Checks SSH normalization for absent and explicit services.ssh objects.
-Only an explicit services.ssh object may enable default port 22 behavior.
+Only an explicit services.ssh.port value may enable SSH rendering.
 Invalid port types and out-of-range values fail with normalize errors.
 
 Validates:
   - Absent services.ssh emits no SSH service data
-  - Explicit services.ssh:{} defaults to port 22
+  - Explicit services.ssh:{} emits no SSH service data
+  - Explicit services.ssh.port 22 and 2222 enable SSH
   - Explicit services.ssh.port uses the configured port
   - Invalid type and range are rejected
 */
 func TestNormalizeServicesSSHPort(t *testing.T) {
-	defaultServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{}`))
+	absentServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{}`))
 	if err != nil {
-		t.Fatalf("normalize default ssh: %v", err)
+		t.Fatalf("normalize absent ssh: %v", err)
 	}
-	if defaultServices.SSHEnabled || defaultServices.SSHPort != 0 {
-		t.Fatalf("expected absent SSH to render nothing, got %#v", defaultServices)
+	if absentServices.SSHEnabled || absentServices.SSHPort != 0 {
+		t.Fatalf("expected absent SSH to render nothing, got %#v", absentServices)
 	}
 
 	emptySSHServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {}}}`))
 	if err != nil {
 		t.Fatalf("normalize empty ssh: %v", err)
 	}
-	if !emptySSHServices.SSHEnabled || emptySSHServices.SSHPort != 22 {
-		t.Fatalf("expected explicit empty SSH to default to 22, got %#v", emptySSHServices)
+	if emptySSHServices.SSHEnabled || emptySSHServices.SSHPort != 0 {
+		t.Fatalf("expected explicit empty SSH to render nothing, got %#v", emptySSHServices)
 	}
 
-	explicitServices, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {"port": 2222}}}`))
+	explicit22Services, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {"port": 22}}}`))
 	if err != nil {
-		t.Fatalf("normalize explicit ssh: %v", err)
+		t.Fatalf("normalize explicit ssh port 22: %v", err)
 	}
-	if explicitServices.SSHPort != 2222 {
-		t.Fatalf("expected explicit SSH port 2222, got %d", explicitServices.SSHPort)
+	if !explicit22Services.SSHEnabled || explicit22Services.SSHPort != 22 {
+		t.Fatalf("expected explicit SSH port 22, got %#v", explicit22Services)
+	}
+
+	explicit2222Services, err := normalizeServicesFromRoot(t, mustRoot(t, `{"services": {"ssh": {"port": 2222}}}`))
+	if err != nil {
+		t.Fatalf("normalize explicit ssh port 2222: %v", err)
+	}
+	if !explicit2222Services.SSHEnabled || explicit2222Services.SSHPort != 2222 {
+		t.Fatalf("expected explicit SSH port 2222, got %#v", explicit2222Services)
 	}
 
 	for _, payload := range []string{
@@ -228,12 +249,12 @@ Title: DHCP reserved range rejection
 Summary:
 Checks DHCP range safety around reserved IPv4 addresses. Ranges must stay in
 the subnet and must not include the router IP, network address, or broadcast
-address.
+address. Explicit DHCP lease fields are required before these safety checks run.
 
 Validates:
   - Router IP overlap is rejected
   - Network and broadcast address overlap is rejected
-  - A normal default range remains valid
+  - A normal explicit range remains valid
 */
 func TestNormalizeServicesRejectsReservedDHCPRanges(t *testing.T) {
 	tests := []struct {
@@ -243,22 +264,22 @@ func TestNormalizeServicesRejectsReservedDHCPRanges(t *testing.T) {
 	}{
 		{
 			name:    "router IP overlap",
-			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-first": 1, "lease-count": 1}`),
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 1, "lease-count": 1}`),
 			wantErr: true,
 		},
 		{
-			name:    "default range valid",
-			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24"`),
+			name:    "explicit range valid",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}`),
 			wantErr: false,
 		},
 		{
 			name:    "broadcast overlap",
-			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-first": 250, "lease-count": 6}`),
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 250, "lease-count": 6}`),
 			wantErr: true,
 		},
 		{
-			name:    "tiny subnet no safe default range",
-			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/31"`),
+			name:    "tiny subnet no safe explicit range",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.50.1/31", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}`),
 			wantErr: true,
 		},
 	}

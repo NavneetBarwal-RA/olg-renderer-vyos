@@ -55,7 +55,9 @@ High-level responsibility split:
 
 ```text
 renderer package:
-  converts OLG/uCentral desired config into deterministic VyOS set commands
+  expects fully resolved OLG/uCentral desired config
+  performs VyOS-specific and safety validation
+  converts desired config into deterministic VyOS set commands
 
 apply package:
   validates rendered commands, prepares managed-root reconciliation operations,
@@ -64,6 +66,15 @@ apply package:
 olg-server-vyos-client-natagent:
   owns NATS, KV loading, temporary applied UUID state, startup reconcile,
   result/status publishing, and orchestration
+```
+
+Renderer ownership notes:
+
+```text
+- renderer does not apply schema defaults
+- renderer does not complete partial config
+- renderer does not infer intent from empty objects
+- upstream adapter/client layers must apply defaults before calling renderer
 ```
 
 ---
@@ -215,7 +226,6 @@ set interfaces bridge br0 description 'WAN'
 set interfaces bridge br0 member interface eth0
 set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 lease 21600
 set service dns forwarding cache-size 0
-set service ssh port 22
 ```
 
 The renderer describes the desired configuration only. Delete, apply, commit, save, discard, and device execution are apply-engine responsibilities.
@@ -792,6 +802,8 @@ LAN2 -> eth2
 
 The renderer emits VyOS service commands for DHCP server, DNS forwarding, and SSH port.
 
+The renderer expects fully resolved service input. It does not apply schema defaults, so upstream adapters must populate resolved DHCP and SSH values before invoking renderer.
+
 DHCP and DNS forwarding LANs are derived from interfaces where:
 
 ```text
@@ -809,19 +821,11 @@ lan_ip        = 192.168.50.1
 net_ip_prefix = 192.168.50.0/24
 ```
 
-DHCP defaults are:
-
-```text
-lease-time  = 21600 seconds
-lease-first = 10
-lease-count = 100
-```
-
-Optional DHCP inputs are read from `interfaces[].ipv4.dhcp.lease-time`, `lease-first`, and `lease-count`. `lease-time` accepts seconds as a number, a numeric string, or duration strings with `s`, `m`, `h`, or `d` suffixes. `lease-first` and `lease-count` must be positive integers.
+Resolved DHCP inputs are read from `interfaces[].ipv4.dhcp.lease-time`, `lease-first`, and `lease-count`. Each field must be present for every rendered service LAN. `lease-time` accepts seconds as a number, a numeric string, or duration strings with `s`, `m`, `h`, or `d` suffixes. `lease-first` and `lease-count` must be positive integers.
 
 DHCP ranges must stay inside the IPv4 subnet and must not include the LAN/router IP, network address, or broadcast address.
 
-Rendered service commands include:
+Rendered DHCP and DNS forwarding commands include:
 
 ```text
 set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600
@@ -833,14 +837,14 @@ set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id
 set service dns forwarding allow-from 192.168.50.0/24
 set service dns forwarding cache-size 0
 set service dns forwarding listen-address 192.168.50.1
-set service ssh port 22
 ```
 
 SSH rendering is explicit-only:
 
 ```text
 absent services.ssh       -> no SSH output
-services.ssh: {}          -> set service ssh port 22
+services.ssh: {}          -> no SSH output
+services.ssh.port: 22     -> set service ssh port 22
 services.ssh.port: 2222   -> set service ssh port 2222
 ```
 
