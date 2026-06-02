@@ -298,6 +298,72 @@ func TestNormalizeServicesRejectsReservedDHCPRanges(t *testing.T) {
 }
 
 /*
+TC-SERVICE-DHCP-003
+Type: Mixed
+Title: Small subnet DHCP edge cases
+Summary:
+Exercises exact /30 and /29 DHCP pool edge cases so small-subnet safety
+behavior stays explicit. The cases cover router overlap, broadcast overlap,
+and one valid narrow /29 pool.
+
+Validates:
+  - /30 pools overlapping the router IP are rejected
+  - /30 pools overlapping broadcast are rejected
+  - A safe /29 range is accepted with the expected start/stop addresses
+  - /29 pools overlapping broadcast are rejected
+*/
+func TestNormalizeServicesSmallSubnetDHCPRanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		wantErr   bool
+		wantStart string
+		wantStop  string
+	}{
+		{
+			name:    "/30 router overlap",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.1.1/30", "dhcp": {"lease-time": 21600, "lease-first": 1, "lease-count": 1}`),
+			wantErr: true,
+		},
+		{
+			name:    "/30 broadcast overlap",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.1.1/30", "dhcp": {"lease-time": 21600, "lease-first": 3, "lease-count": 1}`),
+			wantErr: true,
+		},
+		{
+			name:      "/29 safe range",
+			payload:   servicePayloadWithDHCP(`"subnet": "192.168.1.1/29", "dhcp": {"lease-time": 21600, "lease-first": 2, "lease-count": 4}`),
+			wantStart: "192.168.1.2",
+			wantStop:  "192.168.1.5",
+		},
+		{
+			name:    "/29 broadcast overlap",
+			payload: servicePayloadWithDHCP(`"subnet": "192.168.1.1/29", "dhcp": {"lease-time": 21600, "lease-first": 6, "lease-count": 2}`),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			services, err := normalizeServicesFromRoot(t, mustRoot(t, tc.payload))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected normalize error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected normalize error: %v", err)
+			}
+			got := services.LANs[0]
+			if got.RangeStart != tc.wantStart || got.RangeStop != tc.wantStop {
+				t.Fatalf("unexpected DHCP range: %#v", got)
+			}
+		})
+	}
+}
+
+/*
 TC-SERVICE-DHCP-002
 Type: Negative
 Title: DHCP helper rejects reserved addresses
@@ -328,6 +394,105 @@ func TestValidateDHCPRangeRejectsNetworkAndBroadcast(t *testing.T) {
 			err := validateDHCPRange(prefix, lanIP, mustAddr(t, tc.start), mustAddr(t, tc.stop))
 			if err == nil {
 				t.Fatalf("expected reserved range error")
+			}
+		})
+	}
+}
+
+/*
+TC-SERVICE-NORMALIZE-005
+Type: Positive
+Title: Mixed base and VLAN LAN ordering
+Summary:
+Builds a mixed set of non-VLAN and VLAN service LANs in intentionally
+unordered input. Non-VLAN LANs should keep input-derived order while VLAN
+LANs should be sorted by VLAN ID for deterministic service rendering.
+
+Validates:
+  - Non-VLAN LANs remain in input order
+  - VLAN LANs are sorted by VLAN ID
+  - Mixed ordering remains deterministic with valid service LAN inputs
+*/
+func TestNormalizeServicesOrdersMixedBaseAndVLANLANs(t *testing.T) {
+	root := mustRoot(t, `{
+		"interfaces": [
+			{"name": "LAN-B", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"]}], "ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+			{"name": "VLAN-30", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.30.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}, "vlan": {"id": 30}},
+			{"name": "LAN-A", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+			{"name": "VLAN-10", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}, "vlan": {"id": 10}},
+			{"name": "VLAN-20", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"], "vlan-tag": "auto"}], "ipv4": {"addressing": "static", "subnet": "192.168.20.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}, "vlan": {"id": 20}}
+		]
+	}`)
+
+	services, err := normalizeServicesFromRoot(t, root)
+	if err != nil {
+		t.Fatalf("normalize services: %v", err)
+	}
+
+	got := make([]string, 0, len(services.LANs))
+	for _, lan := range services.LANs {
+		got = append(got, lan.Name)
+	}
+	want := []string{"LAN-B", "LAN-A", "VLAN-10", "VLAN-20", "VLAN-30"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected service LAN order:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+/*
+TC-SERVICE-NORMALIZE-006
+Type: Mixed
+Title: Duplicate and overlapping service LAN prefixes
+Summary:
+Validates that service LAN normalization rejects duplicate or overlapping
+downstream static IPv4 prefixes before DHCP or DNS forwarding config is
+rendered, while allowing unrelated non-overlapping LANs.
+
+Validates:
+  - Duplicate normalized prefixes are rejected
+  - Overlapping prefixes are rejected
+  - Non-overlapping prefixes are accepted
+*/
+func TestNormalizeServicesRejectsDuplicateOrOverlappingLANPrefixes(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{
+			name: "duplicate normalized prefix",
+			payload: `{"interfaces": [
+				{"name": "LAN-A", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+				{"name": "LAN-B", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.2/24", "dhcp": {"lease-time": 21600, "lease-first": 120, "lease-count": 10}}}
+			]}`,
+			wantErr: true,
+		},
+		{
+			name: "overlapping prefix",
+			payload: `{"interfaces": [
+				{"name": "LAN-A", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+				{"name": "LAN-B", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.129/25", "dhcp": {"lease-time": 21600, "lease-first": 2, "lease-count": 10}}}
+			]}`,
+			wantErr: true,
+		},
+		{
+			name: "non-overlapping prefixes",
+			payload: `{"interfaces": [
+				{"name": "LAN-A", "role": "downstream", "ethernet": [{"select-ports": ["LAN1"]}], "ipv4": {"addressing": "static", "subnet": "192.168.50.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}},
+				{"name": "LAN-B", "role": "downstream", "ethernet": [{"select-ports": ["LAN2"]}], "ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}}}
+			]}`,
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeServicesFromRoot(t, mustRoot(t, tc.payload))
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected normalize error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected normalize error: %v", err)
 			}
 		})
 	}

@@ -21,6 +21,7 @@ type rawSSHService struct {
 
 type sortableServiceLAN struct {
 	lan      ServiceLAN
+	prefix   netip.Prefix
 	inputIdx int
 	isVLAN   bool
 	vlanID   int
@@ -80,16 +81,20 @@ func normalizeSSHPort(root map[string]json.RawMessage) (int, bool, error) {
 func normalizeServiceLANs(inputs []ServiceLANInput) ([]ServiceLAN, error) {
 	lans := make([]sortableServiceLAN, 0)
 	for _, input := range inputs {
-		lan, err := normalizeServiceLAN(input)
+		lan, prefix, err := normalizeServiceLAN(input)
 		if err != nil {
 			return nil, newError(CodeNormalizeFailed, fmt.Sprintf("interfaces[%d]: %v", input.InputIndex, err), nil)
 		}
 		lans = append(lans, sortableServiceLAN{
 			lan:      lan,
+			prefix:   prefix,
 			inputIdx: input.InputIndex,
 			isVLAN:   input.IsVLAN,
 			vlanID:   input.VLANID,
 		})
+	}
+	if err := validateNoOverlappingServiceLANPrefixes(lans); err != nil {
+		return nil, newError(CodeNormalizeFailed, err.Error(), nil)
 	}
 
 	sort.SliceStable(lans, func(i, j int) bool {
@@ -117,50 +122,50 @@ func normalizeServiceLANs(inputs []ServiceLANInput) ([]ServiceLAN, error) {
 	return out, nil
 }
 
-func normalizeServiceLAN(input ServiceLANInput) (ServiceLAN, error) {
+func normalizeServiceLAN(input ServiceLANInput) (ServiceLAN, netip.Prefix, error) {
 	if err := validateToken(input.Name, "name", false); err != nil {
-		return ServiceLAN{}, err
+		return ServiceLAN{}, netip.Prefix{}, err
 	}
 	if err := validateAddressToken(input.Subnet, "ipv4.subnet"); err != nil {
-		return ServiceLAN{}, err
+		return ServiceLAN{}, netip.Prefix{}, err
 	}
 
 	prefix, err := netip.ParsePrefix(input.Subnet)
 	if err != nil {
-		return ServiceLAN{}, fmt.Errorf("ipv4.subnet must be an IPv4 prefix")
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("ipv4.subnet must be an IPv4 prefix")
 	}
 	if !prefix.Addr().Is4() {
-		return ServiceLAN{}, fmt.Errorf("ipv4.subnet must be an IPv4 prefix")
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("ipv4.subnet must be an IPv4 prefix")
 	}
 	lanIP := prefix.Addr()
 	prefix = prefix.Masked()
 
 	leaseSecs, err := parseLeaseTime(input.DHCP.LeaseTime)
 	if err != nil {
-		return ServiceLAN{}, fmt.Errorf("invalid ipv4.dhcp.lease-time: %v", err)
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("invalid ipv4.dhcp.lease-time: %v", err)
 	}
 	leaseFirst, err := parseRequiredPositiveInt(input.DHCP.LeaseFirst, "ipv4.dhcp.lease-first")
 	if err != nil {
-		return ServiceLAN{}, err
+		return ServiceLAN{}, netip.Prefix{}, err
 	}
 	leaseCount, err := parseRequiredPositiveInt(input.DHCP.LeaseCount, "ipv4.dhcp.lease-count")
 	if err != nil {
-		return ServiceLAN{}, err
+		return ServiceLAN{}, netip.Prefix{}, err
 	}
 
 	rangeStart, err := ipv4Add(prefix.Addr(), leaseFirst)
 	if err != nil {
-		return ServiceLAN{}, fmt.Errorf("invalid DHCP range start: %v", err)
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("invalid DHCP range start: %v", err)
 	}
 	rangeStop, err := ipv4Add(rangeStart, leaseCount-1)
 	if err != nil {
-		return ServiceLAN{}, fmt.Errorf("invalid DHCP range stop: %v", err)
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("invalid DHCP range stop: %v", err)
 	}
 	if !prefix.Contains(rangeStart) || !prefix.Contains(rangeStop) {
-		return ServiceLAN{}, fmt.Errorf("DHCP range is outside ipv4.subnet")
+		return ServiceLAN{}, netip.Prefix{}, fmt.Errorf("DHCP range is outside ipv4.subnet")
 	}
 	if err := validateDHCPRange(prefix, lanIP, rangeStart, rangeStop); err != nil {
-		return ServiceLAN{}, err
+		return ServiceLAN{}, netip.Prefix{}, err
 	}
 
 	subnetID := 4051 + input.InputIndex
@@ -176,7 +181,26 @@ func normalizeServiceLAN(input ServiceLANInput) (ServiceLAN, error) {
 		RangeStart:  rangeStart.String(),
 		RangeStop:   rangeStop.String(),
 		SubnetID:    subnetID,
-	}, nil
+	}, prefix, nil
+}
+
+func validateNoOverlappingServiceLANPrefixes(lans []sortableServiceLAN) error {
+	for i := 0; i < len(lans); i++ {
+		for j := i + 1; j < len(lans); j++ {
+			left := lans[i]
+			right := lans[j]
+			if left.prefix.Contains(right.prefix.Addr()) || right.prefix.Contains(left.prefix.Addr()) {
+				return fmt.Errorf(
+					"service LAN subnet %s for %s overlaps %s for %s",
+					left.prefix,
+					left.lan.Name,
+					right.prefix,
+					right.lan.Name,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 func validateDHCPRange(prefix netip.Prefix, lanIP, rangeStart, rangeStop netip.Addr) error {

@@ -639,6 +639,8 @@ Summary:
 Renders duplicate VLAN IDs to verify allowed-vlan output is derived from
 unique sorted VIF IDs per member interface. The VIF commands remain deterministic,
 while the bridge member receives only one allowed-vlan line for the duplicated VLAN ID.
+The service LAN subnets are intentionally distinct so this test stays focused on
+duplicate VLAN rendering rather than service LAN overlap rejection.
 
 Validates:
   - VIFs are the single source of truth for VLAN IDs
@@ -663,7 +665,7 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 			},
 			{
 				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
-				"ipv4": {"addressing": "static", "subnet": "192.168.10.2/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
+				"ipv4": {"addressing": "static", "subnet": "192.168.11.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
 				"name": "LAN.10B",
 				"role": "downstream",
 				"vlan": {"id": 10}
@@ -689,7 +691,7 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 		"set interfaces bridge br1 member interface eth2",
 		"set interfaces bridge br1 vif 10 address 192.168.10.1/24",
 		"set interfaces bridge br1 vif 10 description 'LAN.10A'",
-		"set interfaces bridge br1 vif 10 address 192.168.10.2/24",
+		"set interfaces bridge br1 vif 10 address 192.168.11.1/24",
 		"set interfaces bridge br1 vif 10 description 'LAN.10B'",
 	}
 	last := -1
@@ -703,6 +705,50 @@ func TestRenderDerivesAllowedVLANsFromVIFIDs(t *testing.T) {
 		}
 		last = idx
 	}
+}
+
+/*
+TC-NORMALIZE-010
+Type: Negative
+Title: Overlapping service LANs reject duplicate VLAN render payloads
+Summary:
+Confirms that renderer-level normalization rejects payloads whose downstream
+static IPv4 service LANs overlap, even when the interface structure would
+otherwise be valid for duplicate VLAN rendering.
+
+Validates:
+  - Duplicate normalized service LAN prefixes are rejected before render
+  - Duplicate VLAN IDs do not bypass service LAN safety validation
+  - Renderer returns normalize_failed for overlapping service LAN payloads
+*/
+func TestRenderRejectsOverlappingServiceLANs(t *testing.T) {
+	payload := []byte(`{
+		"interfaces": [
+			{
+				"ethernet": [{"select-ports": ["LAN*"]}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.60.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
+				"name": "LAN",
+				"role": "downstream"
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.1/24", "dhcp": {"lease-time": 21600, "lease-first": 10, "lease-count": 100}},
+				"name": "LAN.10A",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			},
+			{
+				"ethernet": [{"select-ports": ["LAN1"], "vlan-tag": "auto"}],
+				"ipv4": {"addressing": "static", "subnet": "192.168.10.2/24", "dhcp": {"lease-time": 21600, "lease-first": 120, "lease-count": 10}},
+				"name": "LAN.10B",
+				"role": "downstream",
+				"vlan": {"id": 10}
+			}
+		]
+	}`)
+
+	_, err := renderPayload(t, payload)
+	assertErrorCode(t, err, CodeNormalizeFailed)
 }
 
 /*
