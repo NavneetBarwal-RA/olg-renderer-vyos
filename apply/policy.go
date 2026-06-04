@@ -11,6 +11,7 @@ const (
 	resetRootNatSource           = "nat source"
 	resetRootServiceDHCPServer   = "service dhcp-server"
 	resetRootServiceDNSForward   = "service dns forwarding"
+	resetRootServiceSSH          = "service ssh"
 )
 
 // DefaultResetPolicy returns the MVP cloud-controlled reset roots.
@@ -41,12 +42,12 @@ func validateResetPolicy(policy ResetPolicy) (ResetPolicy, error) {
 }
 
 func defaultResetRootList() []string {
-	return []string{resetRootInterfacesBridge, resetRootNatSource, resetRootServiceDHCPServer, resetRootServiceDNSForward}
+	return []string{resetRootInterfacesBridge, resetRootNatSource, resetRootServiceDHCPServer, resetRootServiceDNSForward, resetRootServiceSSH}
 }
 
 func isAllowedResetRoot(root string) bool {
 	switch root {
-	case resetRootInterfacesBridge, resetRootInterfacesBridgeBr0, resetRootNatSource, resetRootServiceDHCPServer, resetRootServiceDNSForward:
+	case resetRootInterfacesBridge, resetRootInterfacesBridgeBr0, resetRootNatSource, resetRootServiceDHCPServer, resetRootServiceDNSForward, resetRootServiceSSH:
 		return true
 	default:
 		return false

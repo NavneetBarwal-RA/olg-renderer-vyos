@@ -42,6 +42,7 @@ func defaultDeleteCommands() []string {
 		"delete nat source",
 		"delete service dhcp-server",
 		"delete service dns forwarding",
+		"delete service ssh",
 	}
 }
 

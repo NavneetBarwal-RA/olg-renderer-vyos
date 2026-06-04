@@ -35,9 +35,10 @@ interfaces bridge
 nat source
 service dhcp-server
 service dns forwarding
+service ssh
 ```
 
-Run it only on a disposable/lab VyOS VM or router with console/recovery access. Do not run it on a production device.
+Run it only on a disposable/lab VyOS VM or router with console/recovery access. Do not run it on a production device. The smoke payload does not recreate SSH, so this mode may remove SSH access.
 
 ## Prerequisites
 
@@ -146,7 +147,7 @@ means:
 ```text
 - the smoke command will replace only the targeted smoke bridge node
 - interfaces bridge br0 is deleted/recreated with DHCP and eth0 membership
-- nat source, service dhcp-server, and service dns forwarding are not touched by the default smoke mode
+- nat source, service dhcp-server, service dns forwarding, and service ssh are not touched by the default smoke mode
 - all other VyOS config remains untouched unless it is under the targeted smoke path
 ```
 
@@ -174,6 +175,7 @@ delete interfaces bridge
 delete nat source
 delete service dhcp-server
 delete service dns forwarding
+delete service ssh
 set interfaces bridge br0 address dhcp
 set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
 set interfaces bridge br0 member interface eth0
@@ -181,7 +183,7 @@ commit=true
 save=false
 ```
 
-means the normal apply policy will replace only managed roots. `interfaces bridge` is managed and therefore deleted/recreated, and the smoke payload recreates `br0` with DHCP and eth0 membership. `nat source`, `service dhcp-server`, and `service dns forwarding` are managed and therefore deleted/recreated. Broad `service` and `service ssh` are not reset by default. All other VyOS config remains untouched unless it is under a managed root.
+means the normal apply policy will replace only managed roots. `interfaces bridge` is managed and therefore deleted/recreated, and the smoke payload recreates `br0` with DHCP and eth0 membership. `nat source`, `service dhcp-server`, `service dns forwarding`, and `service ssh` are managed and therefore deleted/recreated. Broad `service` is not reset by default. All other VyOS config remains untouched unless it is under a managed root.
 
 This is safer than whole-device reconciliation for the current phase. The smoke test does not delete everything except a preserve whitelist; it deletes only declared managed roots. A future full-device reconciliation mode would need to be separate, explicit, and protected by stronger safeguards because an incomplete preserve list could remove SSH, login, WAN, NTP, or system configuration.
 

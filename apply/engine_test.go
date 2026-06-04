@@ -306,7 +306,7 @@ func TestApplyReturnsPartialResultOnCommitFailure(t *testing.T) {
 	if result.CommitOutput != "commit failed" || result.DiscardOutput != "discard ok" {
 		t.Fatalf("execution outputs not preserved: %#v", result)
 	}
-	if len(result.DeleteCommands) != 4 || len(result.SetCommands) != 4 {
+	if len(result.DeleteCommands) != 5 || len(result.SetCommands) != 4 {
 		t.Fatalf("partial result missing commands: %#v", result)
 	}
 }
@@ -520,7 +520,7 @@ func TestInfoAndErrorHelpers(t *testing.T) {
 	if info.Name != "olg-renderer-vyos/apply" || info.Target != "vyos" {
 		t.Fatalf("unexpected info: %#v", info)
 	}
-	assertStringSlicesEqual(t, info.DefaultResetRoots, []string{"interfaces bridge", "nat source", "service dhcp-server", "service dns forwarding"})
+	assertStringSlicesEqual(t, info.DefaultResetRoots, []string{"interfaces bridge", "nat source", "service dhcp-server", "service dns forwarding", "service ssh"})
 	if info.SaveDefault {
 		t.Fatalf("save default should be false")
 	}

@@ -16,12 +16,12 @@ The order is part of the deterministic apply contract.
 Validates:
   - Default roots include interfaces bridge
   - Default roots include nat source
-  - Default roots include service dhcp-server and service dns forwarding
+  - Default roots include service dhcp-server, service dns forwarding, and service ssh
   - Delete command order is deterministic
 */
 func TestDefaultResetPolicyBuildsDeterministicDeleteCommands(t *testing.T) {
 	policy := DefaultResetPolicy()
-	assertStringSlicesEqual(t, policy.ResetRoots, []string{"interfaces bridge", "nat source", "service dhcp-server", "service dns forwarding"})
+	assertStringSlicesEqual(t, policy.ResetRoots, []string{"interfaces bridge", "nat source", "service dhcp-server", "service dns forwarding", "service ssh"})
 	assertStringSlicesEqual(t, buildDeleteCommands(policy), defaultDeleteCommands())
 }
 
@@ -59,16 +59,16 @@ Validates:
   - interfaces bridge is accepted
   - interfaces bridge br0 is accepted for targeted lab smoke
   - nat source is accepted
-  - service DHCP and DNS forwarding roots are accepted
+  - service DHCP, DNS forwarding, and SSH roots are accepted
   - Internal whitespace is normalized
 */
 func TestWithResetPolicyAcceptsAllowedRoots(t *testing.T) {
-	engine, err := New(WithResetPolicy(ResetPolicy{ResetRoots: []string{" nat   source ", "interfaces\tbridge", "interfaces bridge   br0", "service   dhcp-server", "service dns\tforwarding"}}))
+	engine, err := New(WithResetPolicy(ResetPolicy{ResetRoots: []string{" nat   source ", "interfaces\tbridge", "interfaces bridge   br0", "service   dhcp-server", "service dns\tforwarding", "service\tssh"}}))
 	assertNoApplyError(t, err)
 
 	plan, err := engine.Prepare(contextBackground(), baseInput(sampleCommands()))
 	assertNoApplyError(t, err)
-	assertStringSlicesEqual(t, plan.DeleteCommands, []string{"delete nat source", "delete interfaces bridge", "delete interfaces bridge br0", "delete service dhcp-server", "delete service dns forwarding"})
+	assertStringSlicesEqual(t, plan.DeleteCommands, []string{"delete nat source", "delete interfaces bridge", "delete interfaces bridge br0", "delete service dhcp-server", "delete service dns forwarding", "delete service ssh"})
 }
 
 /*
@@ -82,7 +82,7 @@ The engine must reject every root outside the exact MVP allowlist.
 Validates:
   - Protected roots are rejected
   - Broad interfaces and nat roots are rejected
-  - Broad service and service ssh roots are rejected
+  - Broad service roots are rejected
   - Invalid policies return invalid_input
 */
 func TestWithResetPolicyRejectsUnsafeRoots(t *testing.T) {
@@ -95,7 +95,6 @@ func TestWithResetPolicyRejectsUnsafeRoots(t *testing.T) {
 		"interfaces ethernet",
 		"interfaces",
 		"nat",
-		"service ssh",
 		"service dns",
 	}
 

@@ -326,6 +326,7 @@ interfaces bridge
 nat source
 service dhcp-server
 service dns forwarding
+service ssh
 ```
 
 The default plan deletes:
@@ -335,11 +336,12 @@ delete interfaces bridge
 delete nat source
 delete service dhcp-server
 delete service dns forwarding
+delete service ssh
 ```
 
-Unmanaged VyOS config must not be deleted by the default apply path, including `system login`, `system config-management`, broad `service`, `service ssh`, `service ntp`, `interfaces loopback`, `interfaces ethernet` / WAN access, and other non-owned configuration. For this phase, whole-device reconciliation is not the design because an incomplete preserve list could delete SSH, login, WAN, NTP, or other system config. Full-device reconciliation, if ever added, must be a separate explicit mode with stronger safeguards.
+Unmanaged VyOS config must not be deleted by the default apply path, including `system login`, `system config-management`, broad `service`, `service ntp`, `interfaces loopback`, `interfaces ethernet` / WAN access, and other non-owned configuration. For this phase, whole-device reconciliation is not the design because an incomplete preserve list could delete login, WAN, NTP, or other system config. Full-device reconciliation, if ever added, must be a separate explicit mode with stronger safeguards.
 
-For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge`, `interfaces bridge br0` for targeted lab smoke, `nat source`, `service dhcp-server`, and `service dns forwarding`; all other roots are rejected. `service ssh` is intentionally not a default reset root.
+For the MVP, custom reset policies may include only the exact allowed roots `interfaces bridge`, `interfaces bridge br0` for targeted lab smoke, `nat source`, `service dhcp-server`, `service dns forwarding`, and `service ssh`; all other roots are rejected. Because `service ssh` is managed, omitting `services.ssh.port` from desired config can delete SSH service configuration.
 
 ### Command validation
 
@@ -441,7 +443,7 @@ set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'
 set interfaces bridge br0 member interface eth0
 ```
 
-Use `--mode minimal-managed` when you intentionally want the smoke command to exercise the normal managed-root policy with `delete interfaces bridge`, `delete nat source`, `delete service dhcp-server`, and `delete service dns forwarding`. The smoke payload intentionally does not change `interfaces ethernet eth0`. Manual changes under `interfaces bridge br0` are expected to be overwritten on the next targeted smoke apply because that node is reset by the smoke policy.
+Use `--mode minimal-managed` when you intentionally want the smoke command to exercise the normal managed-root policy with `delete interfaces bridge`, `delete nat source`, `delete service dhcp-server`, `delete service dns forwarding`, and `delete service ssh`. The smoke payload intentionally does not change `interfaces ethernet eth0` or recreate SSH. Manual changes under `interfaces bridge br0` are expected to be overwritten on the next targeted smoke apply because that node is reset by the smoke policy.
 
 Verification commands for a lab VyOS VM:
 
@@ -453,7 +455,7 @@ show configuration commands | match "interfaces ethernet eth0 description"
 
 The ethernet description should remain whatever it was before the smoke test.
 
-Warning: `minimal-targeted` deletes and recreates `interfaces bridge br0` with DHCP and `eth0` membership; management networking can briefly flap during commit. `minimal-managed` uses the normal apply policy and may delete `interfaces bridge`, `nat source`, `service dhcp-server`, and `service dns forwarding`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
+Warning: `minimal-targeted` deletes and recreates `interfaces bridge br0` with DHCP and `eth0` membership; management networking can briefly flap during commit. `minimal-managed` uses the normal apply policy and may delete `interfaces bridge`, `nat source`, `service dhcp-server`, `service dns forwarding`, and `service ssh`. Restore by re-applying known-good desired config through the normal NATS agent path, restoring a lab snapshot/backup, or using console recovery. NATS, KV, result/status publishing, and applied UUID state remain outside this repo.
 
 Example `Prepare` usage:
 
@@ -858,7 +860,7 @@ service
 nat
 ```
 
-HTTPS, API keys, certificates, broad service reset, and `service ssh` reset are intentionally out of scope.
+HTTPS, API keys, certificates, and broad service reset are intentionally out of scope. SSH lifecycle is limited to managing the `service ssh` root with renderer support for `service ssh port`.
 
 ---
 
