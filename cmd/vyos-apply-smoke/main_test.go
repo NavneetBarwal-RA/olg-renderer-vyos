@@ -278,9 +278,12 @@ func TestRunSkipApplyManagedModePreviewsManagedDeletesAndBridgeOnlySets(t *testi
 	got := out.String()
 	for _, want := range []string{
 		"[smoke] target=vyos config_uuid=smoke-20260526T010203Z mode=minimal-managed",
-		"[smoke] plan delete_count=2 set_count=3 commit=true save=false",
+		"[smoke] plan delete_count=5 set_count=3 commit=true save=false",
 		"[smoke] delete[0]=delete interfaces bridge",
 		"[smoke] delete[1]=delete nat source",
+		"[smoke] delete[2]=delete service dhcp-server",
+		"[smoke] delete[3]=delete service dns forwarding",
+		"[smoke] delete[4]=delete service ssh",
 		"[smoke] set[0]=set interfaces bridge br0 address dhcp",
 		"[smoke] set[1]=set interfaces bridge br0 description 'OLG_APPLY_SMOKE_TEST'",
 		"[smoke] set[2]=set interfaces bridge br0 member interface eth0",
@@ -333,7 +336,7 @@ func TestApplyOptionsForSmokeSelectsTargetedPolicyByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare managed: %v", err)
 	}
-	if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge", "delete nat source"}) {
+	if !reflect.DeepEqual(plan.DeleteCommands, []string{"delete interfaces bridge", "delete nat source", "delete service dhcp-server", "delete service dns forwarding", "delete service ssh"}) {
 		t.Fatalf("unexpected managed deletes: %#v", plan.DeleteCommands)
 	}
 }

@@ -48,12 +48,14 @@ func newError(code, msg string, err error) *Error {
 type RenderData struct {
 	Interfaces InterfacesSection
 	NAT        NATSection
+	Services   ServiceSection
 }
 
 // InterfacesSection contains normalized interface render data.
 type InterfacesSection struct {
-	Bridges   []Bridge
-	Ethernets []Ethernet
+	Bridges          []Bridge
+	Ethernets        []Ethernet
+	ServiceLANInputs []ServiceLANInput
 }
 
 // Bridge describes one normalized VyOS bridge.
@@ -62,7 +64,6 @@ type Bridge struct {
 	Address          string
 	Description      string
 	MemberInterfaces []string
-	EnableVLAN       bool
 	VIFs             []VIF
 }
 
@@ -80,6 +81,21 @@ type Ethernet struct {
 	Description string
 }
 
+// ServiceLANInput describes an accepted downstream static IPv4 interface used
+// for current DHCP and DNS forwarding service normalization. The current OLG
+// schema has no separate DHCP or DNS service objects, so this inference is
+// intentional current-schema behavior rather than renderer defaulting.
+// TODO: When the schema adds explicit DHCP/DNS services, switch service
+// rendering from interface inference to explicit schema-driven inputs.
+type ServiceLANInput struct {
+	InputIndex int
+	Name       string
+	Subnet     string
+	DHCP       rawDHCP
+	IsVLAN     bool
+	VLANID     int
+}
+
 // NATSection contains normalized source NAT rules.
 type NATSection struct {
 	Rules []NATRule
@@ -91,6 +107,25 @@ type NATRule struct {
 	OutboundInterface  string
 	SourceAddress      string
 	TranslationAddress string
+}
+
+// ServiceSection contains normalized service render data.
+type ServiceSection struct {
+	LANs       []ServiceLAN
+	SSHEnabled bool
+	SSHPort    int
+}
+
+// ServiceLAN describes one downstream IPv4 LAN currently used by inferred DHCP
+// and DNS forwarding service rendering.
+type ServiceLAN struct {
+	Name        string
+	LANIP       string
+	NetIPPrefix string
+	LeaseSecs   int
+	RangeStart  string
+	RangeStop   string
+	SubnetID    int
 }
 
 // Normalize converts decoded payload fields into template-ready data.
@@ -105,5 +140,10 @@ func Normalize(root map[string]json.RawMessage, portMap map[string][]string) (Re
 		return RenderData{}, err
 	}
 
-	return RenderData{Interfaces: interfaces, NAT: nat}, nil
+	services, err := normalizeServices(root, interfaces.ServiceLANInputs)
+	if err != nil {
+		return RenderData{}, err
+	}
+
+	return RenderData{Interfaces: interfaces, NAT: nat, Services: services}, nil
 }

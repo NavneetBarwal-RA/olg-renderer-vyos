@@ -22,8 +22,15 @@ type rawEthernet struct {
 }
 
 type rawIPv4 struct {
-	Addressing string `json:"addressing"`
-	Subnet     string `json:"subnet"`
+	Addressing string  `json:"addressing"`
+	DHCP       rawDHCP `json:"dhcp"`
+	Subnet     string  `json:"subnet"`
+}
+
+type rawDHCP struct {
+	LeaseTime  json.RawMessage `json:"lease-time"`
+	LeaseFirst json.RawMessage `json:"lease-first"`
+	LeaseCount json.RawMessage `json:"lease-count"`
 }
 
 type rawVLAN struct {
@@ -61,6 +68,7 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 	bridges := make([]Bridge, 0)
 	ethDescriptions := make(map[string]ethernetDescription)
 	pendingVLANs := make([]pendingVLAN, 0)
+	serviceLANInputs := make([]ServiceLANInput, 0)
 
 	hasUpstreamBridge := false
 	firstDownstreamIdx := -1
@@ -107,6 +115,9 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 				Description:      entry.Name,
 				MemberInterfaces: portNames,
 			})
+			if entry.IPv4.Addressing == "static" {
+				serviceLANInputs = append(serviceLANInputs, serviceLANInputFromRaw(entry, idx, true))
+			}
 			for _, portName := range portNames {
 				updateEthernetDescription(ethDescriptions, portName, entry.Name, ethernetDescriptionPriorityVLAN)
 			}
@@ -129,7 +140,6 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 				Address:          address,
 				Description:      entry.Name,
 				MemberInterfaces: portNames,
-				EnableVLAN:       false,
 			})
 		case "downstream":
 			bridgeName := "br" + strconv.Itoa(downstreamCount+1)
@@ -138,13 +148,15 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 				Address:          address,
 				Description:      entry.Name,
 				MemberInterfaces: portNames,
-				EnableVLAN:       true,
 			}
 			bridges = append(bridges, bridge)
 			if firstDownstreamIdx < 0 {
 				firstDownstreamIdx = len(bridges) - 1
 			}
 			downstreamCount++
+			if entry.IPv4.Addressing == "static" {
+				serviceLANInputs = append(serviceLANInputs, serviceLANInputFromRaw(entry, idx, false))
+			}
 		}
 
 		for _, portName := range portNames {
@@ -191,7 +203,22 @@ func normalizeInterfaces(root map[string]json.RawMessage, portMap map[string][]s
 		return ethernets[i].Name < ethernets[j].Name
 	})
 
-	return InterfacesSection{Bridges: bridges, Ethernets: ethernets}, nil
+	return InterfacesSection{Bridges: bridges, Ethernets: ethernets, ServiceLANInputs: serviceLANInputs}, nil
+}
+
+func serviceLANInputFromRaw(entry rawInterface, idx int, isVLAN bool) ServiceLANInput {
+	vlanID := 0
+	if entry.VLAN != nil {
+		vlanID = entry.VLAN.ID
+	}
+	return ServiceLANInput{
+		InputIndex: idx,
+		Name:       entry.Name,
+		Subnet:     entry.IPv4.Subnet,
+		DHCP:       entry.IPv4.DHCP,
+		IsVLAN:     isVLAN,
+		VLANID:     vlanID,
+	}
 }
 
 func rejectInterfaceAliases(rawEntry json.RawMessage) error {

@@ -35,16 +35,52 @@ func TestApplyInvokesExecutorWithPreparedPlan(t *testing.T) {
 	want := Plan{
 		Target:         "vyos",
 		ConfigUUID:     "cfg-123",
-		DeleteCommands: []string{"delete interfaces bridge", "delete nat source"},
+		DeleteCommands: defaultDeleteCommands(),
 		SetCommands: []string{
 			"set interfaces bridge br0 address dhcp",
 			"set interfaces ethernet eth0 description 'WAN uplink'",
+			"set service ssh port 22",
 			"set nat source rule 100 translation address masquerade",
 		},
 		Commit: true,
 		Save:   false,
 	}
 	assertPlanEqual(t, exec.plans[0], want)
+}
+
+/*
+TC-APPLY-SERVICE-002
+Type: Positive
+Title: Service deletes before service sets
+Summary:
+Applies renderer-style DHCP, DNS forwarding, and SSH service commands.
+The plan sent to the executor must reset cloud-owned DHCP/DNS roots before
+any service set commands are applied.
+
+Validates:
+  - Service DHCP and DNS reset deletes are present
+  - Service set commands are preserved
+  - DeleteCommands are sent separately before SetCommands
+*/
+func TestApplyPlansServiceDeletesBeforeServiceSets(t *testing.T) {
+	exec := &fakeExecutor{result: ExecutionResult{Applied: true}}
+	engine, err := New(WithExecutor(exec))
+	assertNoApplyError(t, err)
+
+	commands := stringsJoinLines(
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dns forwarding listen-address 192.168.50.1",
+		"set service ssh port 22",
+	)
+	_, err = engine.Apply(context.Background(), baseInput(commands))
+	assertNoApplyError(t, err)
+
+	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, defaultDeleteCommands())
+	assertStringSlicesEqual(t, exec.plans[0].SetCommands, []string{
+		"set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600",
+		"set service dns forwarding listen-address 192.168.50.1",
+		"set service ssh port 22",
+	})
 }
 
 /*
@@ -77,7 +113,7 @@ func TestApplyReturnsStructuredResult(t *testing.T) {
 	if result.CommitOutput != "commit ok" {
 		t.Fatalf("unexpected commit output: %q", result.CommitOutput)
 	}
-	assertStringSlicesEqual(t, result.DeleteCommands, []string{"delete interfaces bridge", "delete nat source"})
+	assertStringSlicesEqual(t, result.DeleteCommands, defaultDeleteCommands())
 }
 
 /*
@@ -270,7 +306,7 @@ func TestApplyReturnsPartialResultOnCommitFailure(t *testing.T) {
 	if result.CommitOutput != "commit failed" || result.DiscardOutput != "discard ok" {
 		t.Fatalf("execution outputs not preserved: %#v", result)
 	}
-	if len(result.DeleteCommands) != 2 || len(result.SetCommands) != 3 {
+	if len(result.DeleteCommands) != 5 || len(result.SetCommands) != 4 {
 		t.Fatalf("partial result missing commands: %#v", result)
 	}
 }
@@ -484,7 +520,7 @@ func TestInfoAndErrorHelpers(t *testing.T) {
 	if info.Name != "olg-renderer-vyos/apply" || info.Target != "vyos" {
 		t.Fatalf("unexpected info: %#v", info)
 	}
-	assertStringSlicesEqual(t, info.DefaultResetRoots, []string{"interfaces bridge", "nat source"})
+	assertStringSlicesEqual(t, info.DefaultResetRoots, []string{"interfaces bridge", "nat source", "service dhcp-server", "service dns forwarding", "service ssh"})
 	if info.SaveDefault {
 		t.Fatalf("save default should be false")
 	}

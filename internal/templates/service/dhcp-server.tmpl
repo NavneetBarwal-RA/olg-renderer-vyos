@@ -1,0 +1,8 @@
+{{- range .LANs }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} lease {{ .LeaseSecs }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} option default-router {{ .LANIP }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} option name-server {{ .LANIP }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} range 0 start {{ .RangeStart }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} range 0 stop {{ .RangeStop }}
+set service dhcp-server shared-network-name {{ .Name }} subnet {{ .NetIPPrefix }} subnet-id {{ .SubnetID }}
+{{- end }}

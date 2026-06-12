@@ -146,6 +146,32 @@ internal/vyos/
 
 The public packages should expose stable APIs. Internal packages can evolve as needed.
 
+Renderer responsibilities:
+
+```text
+- expects fully resolved OLG/uCentral desired config
+- performs VyOS-specific validation
+- performs safety validation needed to prevent broken VyOS config
+- normalizes accepted config for deterministic rendering
+- renders deterministic VyOS set commands
+```
+
+Renderer does not:
+
+```text
+- apply schema defaults
+- complete partial configuration
+- infer intent from empty objects or omitted fields
+- duplicate upstream business logic
+```
+
+Defaulting ownership:
+
+```text
+- schema defaults are applied upstream by the ucentral client/adapter layer
+- renderer receives resolved config and must not inject missing values
+```
+
 ---
 
 ## 5. Public Renderer Facade
@@ -255,6 +281,8 @@ schema_version = 4.2.0
 ```
 
 Canonical `payload_json` is the raw OLG/uCentral config object.
+
+The payload must already be fully resolved by upstream layers. The renderer does not apply schema defaults or complete partial service data.
 
 Example shape:
 
@@ -516,7 +544,6 @@ set interfaces bridge br0 description 'WAN'
 set interfaces bridge br0 member interface eth0
 set interfaces bridge br1 address 192.168.60.1/24
 set interfaces bridge br1 description 'LAN'
-set interfaces bridge br1 enable-vlan
 set interfaces bridge br1 member interface eth1
 set interfaces bridge br1 member interface eth2 allowed-vlan 10
 set interfaces bridge br1 member interface eth2 native-vlan 1
@@ -537,6 +564,100 @@ Ordering requirements:
 - allowed-vlan lines sorted by member interface, then VLAN ID
 - ethernet interfaces sorted by interface name
 ```
+
+---
+
+## Service Rendering
+
+Supported MVP service output:
+
+```text
+service dhcp-server
+service dns forwarding
+service ssh port
+```
+
+Service DHCP and DNS forwarding LANs are derived from each interface entry satisfying:
+
+```text
+role == downstream
+ipv4.addressing == static
+ipv4.subnet is a non-empty IPv4 prefix
+```
+
+The current OLG schema has no separate DHCP or DNS service objects. For now, downstream static IPv4 LANs are intentionally treated as DHCP/DNS service LANs. This is current-schema behavior, not accidental renderer defaulting.
+
+Service LAN derivation follows normalized interface handling. A LAN is available to service rendering only if the same interface entry was accepted by interface normalization.
+
+TODO: when the schema adds explicit DHCP/DNS services, renderer service output should move from interface-derived inference to explicit schema-driven service rendering.
+
+IPv6 service subnets are not supported for MVP and must fail normalization when selected as service LANs.
+
+For `ipv4.subnet` such as `192.168.50.1/24`, normalization computes:
+
+```text
+lan_ip        = 192.168.50.1
+net_ip_prefix = 192.168.50.0/24
+```
+
+The renderer expects fully resolved service input from upstream and does not apply schema defaults for service fields.
+
+Resolved DHCP input fields:
+
+```text
+interfaces[].ipv4.dhcp.lease-time
+interfaces[].ipv4.dhcp.lease-first
+interfaces[].ipv4.dhcp.lease-count
+```
+
+Each DHCP field must be present for every rendered service LAN. `lease-time` accepts numeric seconds, numeric string seconds, or duration strings with `s`, `m`, `h`, or `d` suffix. `lease-first` and `lease-count` must parse to positive integers; zero and negative values are rejected.
+
+DHCP range:
+
+```text
+range_start = net_ip + lease_first
+range_stop  = range_start + lease_count - 1
+```
+
+The range must remain inside the IPv4 subnet and must not include the LAN/router IP, network address, or broadcast address.
+
+Subnet ID:
+
+```text
+if interface has vlan.id > 0:
+  subnet_id = vlan.id
+else:
+  subnet_id = 4051 + original zero-based interfaces[] index
+```
+
+For one LAN, rendered DHCP/DNS output is:
+
+```text
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 lease 21600
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option default-router 192.168.50.1
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 option name-server 192.168.50.1
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 start 192.168.50.10
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 range 0 stop 192.168.50.109
+set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id 4052
+set service dns forwarding allow-from 192.168.50.0/24
+set service dns forwarding cache-size 0
+set service dns forwarding listen-address 192.168.50.1
+```
+
+For multiple LANs, DNS forwarding renders all `allow-from` lines in deterministic LAN order, one `cache-size 0` line, then all `listen-address` lines in deterministic LAN order.
+
+SSH rendering is explicit-only:
+
+```text
+absent services.ssh       -> no SSH output
+services.ssh: {}          -> no SSH output
+services.ssh.port: 22     -> set service ssh port 22
+services.ssh.port: 2222   -> set service ssh port 2222
+```
+
+Valid SSH ports are integers in `1..65535`.
+
+HTTPS, API keys, certificates, allow-client, and broad service reset are out of scope. SSH lifecycle is limited to managing the `service ssh` root with renderer support for `service ssh port`.
 
 ---
 
@@ -651,6 +772,7 @@ Initial render order:
 
 ```text
 interfaces
+service
 nat
 ```
 
@@ -670,6 +792,9 @@ Normalization owns:
 - bridge naming
 - VLAN/VIF grouping
 - renderer-configured physical port mapping
+- service LAN derivation from downstream static IPv4 interfaces
+- DHCP lease/range normalization
+- SSH port normalization
 - NAT rule normalization
 - deterministic sorting
 ```
@@ -880,6 +1005,9 @@ Example plan:
 DeleteCommands:
   delete interfaces bridge
   delete nat source
+  delete service dhcp-server
+  delete service dns forwarding
+  delete service ssh
 
 SetCommands:
   <renderer output>
@@ -1064,6 +1192,9 @@ DefaultResetPolicy := ResetPolicy{
     ResetRoots: []string{
         "interfaces bridge",
         "nat source",
+        "service dhcp-server",
+        "service dns forwarding",
+        "service ssh",
     },
 }
 ```
@@ -1073,6 +1204,9 @@ Currently managed roots:
 ```text
 - interfaces bridge
 - nat source
+- service dhcp-server
+- service dns forwarding
+- service ssh
 ```
 
 Unmanaged examples that must be preserved by default:
@@ -1119,11 +1253,18 @@ Apply may delete `nat source` before applying rendered source NAT rules.
 
 Therefore, a reserved cloud-managed NAT rule ID range is not required for MVP.
 
+For MVP, `service dhcp-server`, `service dns forwarding`, and `service ssh` are managed roots.
+
+Apply may delete these service roots before applying rendered DHCP, DNS forwarding, and SSH port rules. Broad `service` is not a managed root by default. If desired config omits `services.ssh.port`, apply may delete SSH service configuration.
+
 For MVP, allowed managed roots are exactly:
 
 ```text
 interfaces bridge
 nat source
+service dhcp-server
+service dns forwarding
+service ssh
 ```
 
 For MVP, these managed roots must be rejected:
@@ -1137,6 +1278,7 @@ container
 interfaces ethernet
 interfaces
 nat
+service dns
 <empty>
 /
 ```
@@ -1215,6 +1357,16 @@ MVP command path allowlist:
 set interfaces bridge ...
 set interfaces ethernet <name> description ...
 set nat source ...
+set service dhcp-server shared-network-name <name> subnet <cidr> lease <seconds>
+set service dhcp-server shared-network-name <name> subnet <cidr> option default-router <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> option name-server <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> range 0 start <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> range 0 stop <ipv4>
+set service dhcp-server shared-network-name <name> subnet <cidr> subnet-id <positive-int>
+set service dns forwarding allow-from <cidr>
+set service dns forwarding cache-size 0
+set service dns forwarding listen-address <ipv4>
+set service ssh port <port>
 ```
 
 Rules:
@@ -1223,6 +1375,9 @@ Rules:
 - `set interfaces bridge ...` is allowed because `interfaces bridge` is a managed root.
 - `set nat source ...` is allowed because `nat source` is a managed root.
 - `set interfaces ethernet <name> description ...` is allowed because renderer may set ethernet descriptions while `interfaces ethernet` is unmanaged and preserved from broad deletion.
+- Exact renderer-emitted `set service dhcp-server ...` forms are allowed because `service dhcp-server` is a managed root.
+- Exact renderer-emitted `set service dns forwarding ...` forms are allowed because `service dns forwarding` is a managed root.
+- `set service ssh port <port>` is allowed as the current renderer-emitted SSH setting because `service ssh` is a managed root.
 - Other `set ...` roots must be rejected until explicitly supported by renderer/apply policy.
 ```
 
@@ -1752,6 +1907,7 @@ Sorting requirements:
 - sections sorted by fixed render order
 - bridges sorted by generated bridge order
 - VLANs sorted by VLAN ID
+- service LANs sorted with non-VLAN LANs in input-derived order followed by VLAN LANs by VLAN ID
 - ethernet interfaces sorted by interface name
 - NAT rules sorted by numeric rule ID
 ```
@@ -1777,6 +1933,9 @@ Required:
 - schema compatibility checks
 - optional payload metadata mismatch
 - interface normalization
+- service DHCP/DNS/SSH normalization
+- service SSH is emitted only when `services.ssh.port` is explicit
+- DHCP ranges overlapping router, network, or broadcast addresses are rejected
 - NAT canonical field handling
 - renderer rejects empty desired config with UUID-only payload
 - renderer rejects desired config with no renderable upstream interface
@@ -1799,6 +1958,7 @@ Required fixtures:
 ```text
 interface-basic.json
 interface-vlan.json
+service-basic.json
 nat-explicit.json
 nat-absent.json
 full-mvp.json
@@ -1809,6 +1969,7 @@ Required golden outputs:
 ```text
 interface-basic.set
 interface-vlan.set
+service-basic.set
 nat-explicit.set
 nat-absent.set
 full-mvp.set
@@ -1825,18 +1986,23 @@ Required:
 - command parser handles blank lines and trailing spaces
 - comment lines are rejected
 - non-allowlisted set paths are rejected
+- service command parser accepts only exact renderer-emitted DHCP/DNS/SSH forms
 - executor is not called when command validation fails
 - Prepare rejects unsafe commands
 - Prepare returns deterministic managed-root delete/set plan
 - Prepare includes `delete interfaces bridge`
 - Prepare includes `delete nat source`
+- Prepare includes `delete service dhcp-server`
+- Prepare includes `delete service dns forwarding`
+- Prepare includes `delete service ssh`
+- Prepare does not include broad `delete service`
 - Prepare does not include delete commands for unmanaged roots
 - Prepare uses DefaultResetPolicy when no override is provided
 - WithResetPolicy replaces the default reset policy
-- WithResetPolicy accepts allowed roots: `interfaces bridge`, `nat source`
+- WithResetPolicy accepts allowed roots: `interfaces bridge`, `nat source`, `service dhcp-server`, `service dns forwarding`, `service ssh`
 - WithResetPolicy rejects empty root
 - WithResetPolicy rejects full/root delete (`/`)
-- WithResetPolicy rejects `system`, `service`, `users`, `protocols`, `container`, `interfaces`, `interfaces ethernet`, and broad `nat`
+- WithResetPolicy rejects `system`, broad `service`, `users`, `protocols`, `container`, `interfaces`, `interfaces ethernet`, and broad `nat`
 - invalid ResetPolicy causes `apply.New(...)` to return an error
 - Prepare allows set commands under unmanaged roots only when explicitly allowlisted
 - Prepare rejects empty DesiredCommands
@@ -1848,6 +2014,7 @@ Required:
 - executor receives structured DeleteCommands and SetCommands, not one arbitrary shell command string
 - real executor implementation avoids unsafe shell interpolation
 - Apply sends delete commands before set commands
+- Apply sends service delete commands before service set commands
 - Apply performs delete + set + commit in one candidate session
 - Apply commits through executor
 - Apply returns structured result
@@ -1937,7 +2104,7 @@ commit=true
 save=false
 ```
 
-This means the smoke command will replace only the targeted smoke node `interfaces bridge br0`, then recreate it with DHCP, the smoke description, and `eth0` membership. All other VyOS config remains untouched unless it is under that targeted smoke path. The smoke payload intentionally does not change `interfaces ethernet eth0`. Use `--mode minimal-managed` to exercise the normal managed-root policy, which emits `delete interfaces bridge` and `delete nat source`. Manual changes under `interfaces bridge br0`, such as changing the description, are expected to be overwritten on the next targeted smoke apply.
+This means the smoke command will replace only the targeted smoke node `interfaces bridge br0`, then recreate it with DHCP, the smoke description, and `eth0` membership. All other VyOS config remains untouched unless it is under that targeted smoke path. The smoke payload intentionally does not change `interfaces ethernet eth0`. Use `--mode minimal-managed` to exercise the normal managed-root policy, which emits `delete interfaces bridge`, `delete nat source`, `delete service dhcp-server`, `delete service dns forwarding`, and `delete service ssh`. Manual changes under `interfaces bridge br0`, such as changing the description, are expected to be overwritten on the next targeted smoke apply.
 
 Expected verification commands:
 
@@ -1970,7 +2137,7 @@ Cleanup guidance:
 
 ```text
 - The default smoke mode deletes and recreates interfaces bridge br0 with DHCP and eth0 membership.
-- The minimal-managed smoke mode may delete interfaces bridge and nat source through normal apply policy.
+- The minimal-managed smoke mode may delete interfaces bridge, nat source, service dhcp-server, service dns forwarding, and service ssh through normal apply policy.
 - Run only on a disposable/lab VyOS VM or router.
 - Management networking can briefly flap during commit; prefer console access.
 - Restore with known-good desired config through the normal NATS agent path, a lab snapshot/backup, or console recovery.
@@ -2036,17 +2203,24 @@ olg-renderer-vyos/
     normalize/
       normalize.go
       interface.go
+      service.go
       nat.go
 
     templates/
       templates.go
       interface.tmpl
+      service.tmpl
       nat.tmpl
 
       interface/
         bridge.tmpl
         ethernet.tmpl
         vlan.tmpl
+
+      service/
+        dhcp-server.tmpl
+        dns-forwarding.tmpl
+        ssh.tmpl
 
     vyos/
       doc.go
@@ -2057,6 +2231,7 @@ olg-renderer-vyos/
     valid/
       interface-basic.json
       interface-vlan.json
+      service-basic.json
       nat-explicit.json
       nat-absent.json
       full-mvp.json
@@ -2064,6 +2239,7 @@ olg-renderer-vyos/
     golden/
       interface-basic.set
       interface-vlan.set
+      service-basic.set
       nat-explicit.set
       nat-absent.set
       full-mvp.set
@@ -2155,7 +2331,7 @@ Apply acceptance:
 - real executor boundary is documented
 - executor does not expose arbitrary shell command execution
 - validated commands are passed as structured VyOS config operations
-- Prepare returns managed-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`
+- Prepare returns managed-root delete commands for MVP roots: `delete interfaces bridge`, `delete nat source`, `delete service dhcp-server`, `delete service dns forwarding`, `delete service ssh`
 - Prepare generates delete commands from ResetPolicy
 - roots outside ResetPolicy are preserved from broad deletion
 - ResetPolicy roots are validated against the allowed managed-root list
@@ -2199,11 +2375,9 @@ NATS integration acceptance belongs to `olg-server-vyos-client-natagent`:
 Future renderer work:
 
 ```text
-- DHCP rendering
-- DNS rendering
 - firewall rendering
 - routing rendering
-- service rendering
+- additional service rendering
 - system rendering
 - PKI rendering
 - multiple schema versions

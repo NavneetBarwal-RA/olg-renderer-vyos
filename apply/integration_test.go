@@ -29,8 +29,8 @@ func TestApplyIntegrationFirstTimeConfigurePlanAndExecute(t *testing.T) {
 	if !result.Applied || exec.calls != 1 {
 		t.Fatalf("expected successful single apply, result=%#v calls=%d", result, exec.calls)
 	}
-	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, []string{"delete interfaces bridge", "delete nat source"})
-	if len(exec.plans[0].SetCommands) != 3 {
+	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, defaultDeleteCommands())
+	if len(exec.plans[0].SetCommands) != 4 {
 		t.Fatalf("unexpected set command count: %#v", exec.plans[0].SetCommands)
 	}
 }
@@ -60,7 +60,7 @@ func TestApplyIntegrationNATRuleRemovalUsesNatSourceReset(t *testing.T) {
 	_, err = engine.Apply(context.Background(), baseInput(commands))
 	assertNoApplyError(t, err)
 
-	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, []string{"delete interfaces bridge", "delete nat source"})
+	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, defaultDeleteCommands())
 	assertStringSlicesEqual(t, exec.plans[0].SetCommands, []string{
 		"set nat source rule 100 outbound-interface name br0",
 		"set nat source rule 100 translation address masquerade",
@@ -92,7 +92,7 @@ func TestApplyIntegrationVLANRemovalUsesBridgeReset(t *testing.T) {
 	_, err = engine.Apply(context.Background(), baseInput(commands))
 	assertNoApplyError(t, err)
 
-	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, []string{"delete interfaces bridge", "delete nat source"})
+	assertStringSlicesEqual(t, exec.plans[0].DeleteCommands, defaultDeleteCommands())
 	assertStringSlicesEqual(t, exec.plans[0].SetCommands, []string{
 		"set interfaces bridge br1 address 192.168.60.1/24",
 		"set interfaces bridge br1 member interface eth1",

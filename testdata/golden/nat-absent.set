@@ -3,9 +3,18 @@ set interfaces bridge br0 description 'WAN'
 set interfaces bridge br0 member interface eth0
 set interfaces bridge br1 address 192.168.60.1/24
 set interfaces bridge br1 description 'LAN'
-set interfaces bridge br1 enable-vlan
 set interfaces bridge br1 member interface eth1
 set interfaces bridge br1 member interface eth2
 set interfaces ethernet eth0 description 'WAN'
 set interfaces ethernet eth1 description 'LAN'
 set interfaces ethernet eth2 description 'LAN'
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 lease 21600
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 option default-router 192.168.60.1
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 option name-server 192.168.60.1
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 range 0 start 192.168.60.10
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 range 0 stop 192.168.60.137
+set service dhcp-server shared-network-name LAN subnet 192.168.60.0/24 subnet-id 4052
+set service dns forwarding allow-from 192.168.60.0/24
+set service dns forwarding cache-size 0
+set service dns forwarding listen-address 192.168.60.1
+set service ssh port 22

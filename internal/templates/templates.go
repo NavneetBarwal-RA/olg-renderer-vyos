@@ -11,7 +11,7 @@ import (
 	"github.com/routerarchitects/olg-renderer-vyos/internal/normalize"
 )
 
-//go:embed *.tmpl interface/*.tmpl
+//go:embed *.tmpl interface/*.tmpl service/*.tmpl
 var embedFS embed.FS
 
 type Engine struct {
@@ -25,10 +25,14 @@ func New() (*Engine, error) {
 		"vyosQuote":             vyosQuote,
 	}).ParseFS(embedFS,
 		"interface.tmpl",
+		"service.tmpl",
 		"nat.tmpl",
 		"interface/bridge.tmpl",
 		"interface/ethernet.tmpl",
 		"interface/vlan.tmpl",
+		"service/dhcp-server.tmpl",
+		"service/dns-forwarding.tmpl",
+		"service/ssh.tmpl",
 	)
 	if err != nil {
 		return nil, err
@@ -41,7 +45,7 @@ func (e *Engine) Render(data normalize.RenderData) (string, error) {
 		return "", fmt.Errorf("template engine is not initialized")
 	}
 
-	sections := make([]string, 0, 2)
+	sections := make([]string, 0, 3)
 
 	interfaces, err := e.execute("interface.tmpl", data.Interfaces)
 	if err != nil {
@@ -50,6 +54,15 @@ func (e *Engine) Render(data normalize.RenderData) (string, error) {
 	interfaces = normalizeSection(interfaces)
 	if interfaces != "" {
 		sections = append(sections, interfaces)
+	}
+
+	services, err := e.execute("service.tmpl", data.Services)
+	if err != nil {
+		return "", err
+	}
+	services = normalizeSection(services)
+	if services != "" {
+		sections = append(sections, services)
 	}
 
 	nat, err := e.execute("nat.tmpl", data.NAT)
@@ -78,7 +91,18 @@ func normalizeSection(in string) string {
 	if in == "" {
 		return ""
 	}
-	return in + "\n"
+	lines := strings.Split(in, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 func allowedVLANsForMember(vifs []normalize.VIF, member string) []int {
