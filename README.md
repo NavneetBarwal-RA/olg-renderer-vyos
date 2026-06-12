@@ -814,7 +814,11 @@ ipv4.addressing == static
 ipv4.subnet is an IPv4 prefix
 ```
 
+The current OLG schema has no separate DHCP or DNS service objects. For now, downstream static IPv4 LANs are intentionally treated as DHCP/DNS service LANs. This is current-schema behavior, not accidental renderer defaulting.
+
 The service LAN list is carried forward from normalized interface handling so service rendering cannot accept a LAN that interface rendering rejected.
+
+TODO: when the schema adds explicit DHCP/DNS services, move this renderer from interface-derived service inference to explicit schema-driven service rendering.
 
 For each LAN, `ipv4.subnet` such as `192.168.50.1/24` is normalized to:
 

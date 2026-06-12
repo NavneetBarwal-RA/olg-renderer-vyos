@@ -81,7 +81,12 @@ type Ethernet struct {
 	Description string
 }
 
-// ServiceLANInput describes an accepted downstream static interface for service normalization.
+// ServiceLANInput describes an accepted downstream static IPv4 interface used
+// for current DHCP and DNS forwarding service normalization. The current OLG
+// schema has no separate DHCP or DNS service objects, so this inference is
+// intentional current-schema behavior rather than renderer defaulting.
+// TODO: When the schema adds explicit DHCP/DNS services, switch service
+// rendering from interface inference to explicit schema-driven inputs.
 type ServiceLANInput struct {
 	InputIndex int
 	Name       string
@@ -111,7 +116,8 @@ type ServiceSection struct {
 	SSHPort    int
 }
 
-// ServiceLAN describes one downstream IPv4 LAN used by DHCP and DNS forwarding services.
+// ServiceLAN describes one downstream IPv4 LAN currently used by inferred DHCP
+// and DNS forwarding service rendering.
 type ServiceLAN struct {
 	Name        string
 	LANIP       string

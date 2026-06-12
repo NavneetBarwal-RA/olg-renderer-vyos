@@ -177,11 +177,6 @@ func validateServiceDHCPSetPath(tokens []string) error {
 		switch tokens[8] {
 		case "default-router", "name-server":
 			return validateIPv4AddrToken(tokens[9])
-		case "domain-name":
-			if tokens[9] != "vyos.net" {
-				return fmt.Errorf("service dhcp-server domain-name must be vyos.net")
-			}
-			return nil
 		default:
 			return fmt.Errorf("service dhcp-server option %q is not supported", tokens[8])
 		}

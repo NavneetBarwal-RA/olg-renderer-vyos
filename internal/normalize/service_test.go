@@ -15,6 +15,8 @@ Summary:
 Builds service LANs from downstream static IPv4 interfaces while ignoring
 interfaces that do not participate in DHCP and DNS forwarding. The test covers
 explicit DHCP lease/range inputs and subnet ID selection for base and VLAN LANs.
+This inference is the intentional current-schema behavior because the OLG
+schema does not yet expose separate DHCP or DNS service objects.
 
 Validates:
   - Upstream, dynamic, and subnetless downstream interfaces are ignored

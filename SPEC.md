@@ -585,7 +585,11 @@ ipv4.addressing == static
 ipv4.subnet is a non-empty IPv4 prefix
 ```
 
+The current OLG schema has no separate DHCP or DNS service objects. For now, downstream static IPv4 LANs are intentionally treated as DHCP/DNS service LANs. This is current-schema behavior, not accidental renderer defaulting.
+
 Service LAN derivation follows normalized interface handling. A LAN is available to service rendering only if the same interface entry was accepted by interface normalization.
+
+TODO: when the schema adds explicit DHCP/DNS services, renderer service output should move from interface-derived inference to explicit schema-driven service rendering.
 
 IPv6 service subnets are not supported for MVP and must fail normalization when selected as service LANs.
 
@@ -638,12 +642,6 @@ set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 subnet-id
 set service dns forwarding allow-from 192.168.50.0/24
 set service dns forwarding cache-size 0
 set service dns forwarding listen-address 192.168.50.1
-```
-
-If `subnet_id == 1`, DHCP output also includes:
-
-```text
-set service dhcp-server shared-network-name <name> subnet <net_ip_prefix> option domain-name vyos.net
 ```
 
 For multiple LANs, DNS forwarding renders all `allow-from` lines in deterministic LAN order, one `cache-size 0` line, then all `listen-address` lines in deterministic LAN order.
@@ -1362,7 +1360,6 @@ set nat source ...
 set service dhcp-server shared-network-name <name> subnet <cidr> lease <seconds>
 set service dhcp-server shared-network-name <name> subnet <cidr> option default-router <ipv4>
 set service dhcp-server shared-network-name <name> subnet <cidr> option name-server <ipv4>
-set service dhcp-server shared-network-name <name> subnet <cidr> option domain-name vyos.net
 set service dhcp-server shared-network-name <name> subnet <cidr> range 0 start <ipv4>
 set service dhcp-server shared-network-name <name> subnet <cidr> range 0 stop <ipv4>
 set service dhcp-server shared-network-name <name> subnet <cidr> subnet-id <positive-int>
